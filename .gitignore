@@ -21,6 +21,11 @@ sdkconfig.old
 secrets.h
 secrets.local.h
 remo_secrets.h
+living_secrets.h
+remo_local.h
+.local/
+__pycache__/
+*.pyc
 
 # Logs
 *.log

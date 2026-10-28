@@ -61,4 +61,12 @@ int main() {
     assert(alexaBrightnessStep(153) == 2);
     assert(alexaBrightnessStep(204) == 3);
     assert(alexaBrightnessStep(255) == 4);
+    // Living has direct commands, even when the power is initially unknown.
+    auto living = planLiving({Power::Unknown, -1}, Power::Off, -1);
+    assert(living.valid && living.count == 1 && living.signals[0] == Signal::Off);
+    living = planLiving({Power::Unknown, -1}, Power::Night, -1);
+    assert(living.valid && living.signals[0] == Signal::Night);
+    assert(planLiving({Power::On, -1}, Power::On, 2).valid);
+    living = planLiving({Power::On, -1}, Power::On);
+    assert(living.valid && living.count == 0);
 }

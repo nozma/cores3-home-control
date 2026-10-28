@@ -1,6 +1,16 @@
 #include "lighting.h"
 #include "light_model.h"
 #include "remo_ca.h"
+#if __has_include("remo_local.h")
+#include "remo_local.h"
+#else
+#include "remo_local.example.h"
+#endif
+#if __has_include("living_secrets.h")
+#include "living_secrets.h"
+#else
+#include "living_secrets.example.h"
+#endif
 #if __has_include("remo_secrets.h")
 #include "remo_secrets.h"
 #else
@@ -16,21 +26,54 @@
 
 namespace {
 using namespace light;
-using Job = Plan;
+struct Job : Plan { Id id = Id::Kitchen; };
 struct Result { Job job; int completed; int code; };
 QueueHandle_t requests = nullptr;
 QueueHandle_t results = nullptr;
-State estimated;
-bool busy = false;
-std::atomic<int> progress{0};
-int total = 0;
-String notice = "点灯させてから下の合わせボタンを押す";
+State states[2];
+bool busy[2]{};
+bool normal[2]{};
+std::atomic<int> progress[2]{};
+int total[2]{};
+String notices[2] = {"点灯させてから合わせボタンを押す", "照明を選んで操作してください"};
+int selected = 0;
+int index(Id id) { return static_cast<int>(id); }
+Id selectedId() { return static_cast<Id>(selected); }
 uint32_t sentAt[30]{};
 unsigned sentCount = 0;
 uint32_t lastSent = 0;
 bool hasSent = false;
 uint32_t rateLimitedAt = 0;
 bool rateLimited = false;
+uint32_t localUntil = 0;
+bool localPending = false;
+
+const char* localPayload(Signal signal) {
+    return signal == Signal::Up ? REMO_LOCAL_UP : signal == Signal::Down ? REMO_LOCAL_DOWN :
+           signal == Signal::Warm ? REMO_LOCAL_WARM : REMO_LOCAL_COOL;
+}
+unsigned localDuration(Signal signal) {
+    return signal == Signal::Up ? REMO_LOCAL_UP_MS : signal == Signal::Down ? REMO_LOCAL_DOWN_MS :
+           signal == Signal::Warm ? REMO_LOCAL_WARM_MS : REMO_LOCAL_COOL_MS;
+}
+
+int sendLocal(Signal signal) {
+    if (WiFi.status() != WL_CONNECTED) return -100;
+    WiFiClient client;
+    HTTPClient http;
+    http.setConnectTimeout(800);
+    http.setTimeout(1200);
+    http.setReuse(false);
+    if (!http.begin(client, String("http://") + REMO_LOCAL_HOST + "/messages")) return -102;
+    http.addHeader("X-Requested-With", "XMLHttpRequest");
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST(String(localPayload(signal)));
+    http.end();
+    // Even an uncertain HTTP result may have started IR transmission.
+    localUntil = millis() + localDuration(signal) + 80;
+    localPending = true;
+    return code;
+}
 
 const char* powerName(Power power) {
     switch (power) {
@@ -44,12 +87,14 @@ bool validUrl(const char* value) {
     String url(value);
     return url.startsWith("https://api.nature.global/1/signals/") && url.endsWith("/send");
 }
-bool configured() {
+bool configured(Id id) {
+    if (id == Id::Living) return REMO_ACCESS_TOKEN[0] && REMO_LIVING_ID[0] &&
+        validUrl(REMO_LIVING_FULL) && validUrl(REMO_LIVING_NORMAL);
     return REMO_ACCESS_TOKEN[0] && validUrl(REMO_LIGHT_SWITCH) &&
            validUrl(REMO_LIGHT_UP) && validUrl(REMO_LIGHT_DOWN);
 }
 
-int sendSignal(Signal signal) {
+int sendSignal(Id id, Signal signal) {
     if (WiFi.status() != WL_CONNECTED) return -100;
     if (time(nullptr) < 1704067200) return -101;
     const uint32_t now = millis();
@@ -62,14 +107,27 @@ int sendSignal(Signal signal) {
     HTTPClient http;
     http.setConnectTimeout(8000);
     http.setTimeout(8000);
-    const char* url = signal == Signal::Cycle ? REMO_LIGHT_SWITCH :
-                      signal == Signal::Up ? REMO_LIGHT_UP : REMO_LIGHT_DOWN;
+    String url;
+    String payload;
+    if (id == Id::Kitchen) {
+        url = signal == Signal::Cycle ? REMO_LIGHT_SWITCH :
+              signal == Signal::Up ? REMO_LIGHT_UP : REMO_LIGHT_DOWN;
+    } else if (signal == Signal::Full || signal == Signal::Normal || signal == Signal::On) {
+        url = signal == Signal::Full ? REMO_LIVING_FULL : REMO_LIVING_NORMAL;
+    } else {
+        url = String("https://api.nature.global/1/appliances/") + REMO_LIVING_ID + "/light";
+        const char* button = signal == Signal::On ? "on" : signal == Signal::Off ? "off" :
+            signal == Signal::Night ? "night" : signal == Signal::Up ? "bright-up" :
+            signal == Signal::Down ? "bright-down" : signal == Signal::Warm ? "colortemp-down" : "colortemp-up";
+        payload = String("button=") + button;
+    }
     if (!http.begin(client, url)) return -102;
     http.addHeader("Authorization", String("Bearer ") + REMO_ACCESS_TOKEN);
     http.addHeader("accept", "application/json");
     sentAt[sentCount % 30] = millis();
     ++sentCount;
-    const int code = http.POST("");
+    if (payload.length()) http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    const int code = http.POST(payload);
     http.end();
     lastSent = millis();
     hasSent = true;
@@ -86,71 +144,82 @@ void senderTask(void*) {
         if (xQueueReceive(requests, &job, portMAX_DELAY) != pdTRUE) continue;
         Result result{job, 0, 200};
         for (int i = 0; i < job.count; ++i) {
-            // Keep at least one second between signals, including separate jobs.
-            while (hasSent && millis() - lastSent < 1000) vTaskDelay(pdMS_TO_TICKS(20));
-            result.code = sendSignal(job.signals[i]);
+            // All send paths share this worker so emitted IR never overlaps.
+            while (localPending && static_cast<int32_t>(localUntil - millis()) > 0)
+                vTaskDelay(pdMS_TO_TICKS(10));
+            localPending = false;
+            if (job.id == Id::Living && isAdjustment(job.signals[i])) {
+                result.code = sendLocal(job.signals[i]);
+            } else {
+                while (hasSent && millis() - lastSent < 1000) vTaskDelay(pdMS_TO_TICKS(20));
+                result.code = sendSignal(job.id, job.signals[i]);
+            }
             if (result.code < 200 || result.code >= 300) break;
             ++result.completed;
-            progress.store(result.completed);
+            progress[index(job.id)].store(result.completed);
         }
         xQueueSend(results, &result, portMAX_DELAY);
     }
 }
 
-void button(int column, int row, const char* label, uint32_t color = TFT_DARKGREY) {
+void button(int x, int y, int width, const char* label, uint32_t color = TFT_DARKGREY) {
     auto& d = M5.Display;
-    const int width = row == 2 ? 308 : 100;
-    const int x = 6 + column * (width + 4);
-    const int y = 84 + row * 44;
-    d.fillRoundRect(x, y, width, 39, 5, busy ? TFT_DARKGREY : color);
-    d.setTextColor(TFT_WHITE, busy ? TFT_DARKGREY : color);
-    d.drawString(label, x + width / 2, y + 19);
+    uint32_t background = busy[selected] ? TFT_DARKGREY : color;
+    d.fillRoundRect(x, y, width, 31, 4, background);
+    d.setTextColor(TFT_WHITE, background);
+    d.drawString(label, x + width / 2, y + 15);
 }
 
 bool enqueue(const Job& job) {
-    if (busy) { notice = "送信中です。完了後に再操作してください"; return false; }
+    int n = index(job.id);
+    auto& notice = notices[n];
+    if (busy[n]) { notice = "送信中です。完了後に再操作してください"; return false; }
     if (!requests || !results) { notice = "送信機能を開始できません"; return false; }
-    if (!configured()) { notice = "remo_secrets.h を設定してください"; return false; }
+    bool needsCloud = false;
+    for (int i = 0; i < job.count; ++i) {
+        bool local = job.id == Id::Living && isAdjustment(job.signals[i]);
+        if (local && (!REMO_LOCAL_HOST[0] || !localPayload(job.signals[i])[0])) {
+            notice = "ローカルIR信号の設定を確認してください"; return false;
+        }
+        if (!local) needsCloud = true;
+    }
+    if (needsCloud && !configured(job.id)) { notice = "Remoの設定を確認してください"; return false; }
     if (WiFi.status() != WL_CONNECTED) { notice = "Wi-Fi未接続です"; return false; }
-    if (time(nullptr) < 1704067200) { notice = "時刻同期中です。少し待って再操作"; return false; }
+    if (needsCloud && time(nullptr) < 1704067200) { notice = "時刻同期中です。少し待って再操作"; return false; }
     if (xQueueSend(requests, &job, 0) != pdTRUE) { notice = "送信待ちです"; return false; }
-    busy = true;
-    total = job.count;
-    progress.store(0);
-    notice = "送信中：照明にRemoを向けてください";
+    busy[n] = true;
+    total[n] = job.count;
+    progress[n].store(0);
+    notice = "送信中";
     return true;
 }
 
 void start(Signal signal, int count = 1, int syncLevel = -1) {
     Job job;
+    job.id = selectedId();
     job.count = count;
     job.syncLevel = syncLevel;
     for (int i = 0; i < count; ++i) job.signals[i] = signal;
     enqueue(job);
 }
 
-void target(Power desired) {
-    const int count = pressesTo(estimated.power, desired);
-    if (count < 0) notice = "点灯させてから下の合わせボタンを押す";
-    else if (count == 0) notice = "推定では既にその状態です";
-    else start(Signal::Cycle, count);
-}
-
 void handleButton(int column, int row) {
-    if (row == 0) target(column == 0 ? Power::On : column == 1 ? Power::Night : Power::Off);
-    else if (row == 1 && column == 2) start(Signal::Cycle);
-    else if (row == 2) {
-        // The user confirms that the fixture is currently on by pressing this.
-        start(Signal::Up, kSyncPresses, kMaxStep);
-        if (busy) {
-            estimated.power = Power::On;
-            estimated.brightness = -1;
+    auto& estimated = states[selected];
+    auto& notice = notices[selected];
+    if (row == 0) requestLighting(column == 0 ? Power::On : column == 1 ? Power::Night : Power::Off,
+                                  -1, selectedId());
+    else if (selected == 0) {
+        if (row == 1 && column == 2) start(Signal::Cycle);
+        else if (row == 2) {
+            start(Signal::Up, kSyncPresses, kMaxStep);
+            if (busy[0]) { estimated.power = Power::On; estimated.brightness = -1; }
+        } else if (row == 1) {
+            if (estimated.power != Power::On) notice = "点灯状態に合わせてから調光してください";
+            else start(column == 0 ? Signal::Down : Signal::Up);
         }
-    } else if (row == 1) {
-        if (estimated.power != Power::On) notice = "調光は点灯状態に合わせてから操作";
-        else start(column == 0 ? Signal::Down : Signal::Up);
     }
 }
+
 
 }  // namespace
 
@@ -160,86 +229,156 @@ void redrawLighting() {
     d.setFont(&fonts::efontJA_16);
     d.setTextSize(1);
     d.setTextDatum(middle_center);
-    d.setTextColor(WiFi.status() == WL_CONNECTED ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);
-    String wifi = WiFi.status() == WL_CONNECTED
-        ? "Wi-Fi接続済 " + WiFi.localIP().toString() + " " + String(WiFi.RSSI()) + "dBm"
-        : "Wi-Fi未接続 / 接続待ち";
-    d.drawString(wifi, 160, 12);
-    d.setTextColor(TFT_WHITE, TFT_BLACK);
-    d.drawString(String("照明（推定）：") + powerName(estimated.power), 160, 37);
-    String level = estimated.brightness < 0 ? "未確認" : String((estimated.brightness + 1) * 20);
-    d.drawString("明るさ（推定）：" + level, 160, 60);
-    button(0, 0, "点灯"); button(1, 0, "常夜灯"); button(2, 0, "消灯");
-    button(0, 1, "暗く"); button(1, 1, "明るく"); button(2, 1, "電源1回");
-    button(0, 2, "点灯中に合わせる（最大へ）", TFT_BLUE);
-    d.setTextColor(TFT_YELLOW, TFT_BLACK);
+    for (int n = 0; n < 2; ++n) {
+        uint32_t bg = selected == n ? TFT_BLUE : TFT_DARKGREY;
+        d.fillRoundRect(4 + n * 118, 3, 114, 28, 4, bg);
+        d.setTextColor(TFT_WHITE, bg);
+        d.drawString(n == 0 ? "キッチン" : "リビング", 61 + n * 118, 17);
+    }
     d.setFont(&fonts::efontJA_12);
-    d.drawString(busy ? String("送信中 ") + progress.load() + "/" + total : notice, 160, 225);
+    d.setTextColor(WiFi.status() == WL_CONNECTED ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);
+    d.drawString(WiFi.status() == WL_CONNECTED ? "Wi-Fi接続" : "Wi-Fi待ち", 278, 17);
+    const auto& estimated = states[selected];
+    d.setTextColor(TFT_WHITE, TFT_BLACK);
+    if (selected == 0) {
+        String level = estimated.brightness < 0 ? "未確認" : String((estimated.brightness + 1) * 20) + "%";
+        d.setFont(&fonts::efontJA_16);
+        d.drawString(String(powerName(estimated.power)) + "（推定）  明るさ：" + level, 160, 48);
+        button(4, 68, 101, "点灯"); button(109, 68, 101, "常夜灯"); button(214, 68, 101, "消灯");
+        button(4, 104, 101, "暗く"); button(109, 104, 101, "明るく"); button(214, 104, 101, "電源1回");
+        button(4, 140, 311, "点灯中に合わせる（最大へ）", TFT_BLUE);
+    } else {
+        d.setFont(&fonts::efontJA_16);
+        button(4, 35, 101, "点灯"); button(109, 35, 101, "常夜灯"); button(214, 35, 101, "消灯");
+        d.setFont(&fonts::efontJA_12);
+        d.setTextColor(TFT_WHITE, TFT_BLACK);
+        String brightness = estimated.brightness < 0 ? (normal[1] ? "普段設定" : "未確認") : String(estimated.brightness * 20) + "%";
+        String color = estimated.color < 0 ? (normal[1] ? "普段設定" : "未確認") : String(estimated.color * 20) + "%";
+        d.drawString(String(powerName(estimated.power)) + "（推定） 明るさ：" + brightness, 160, 77);
+        d.drawString("色（暖0% → 白100%）：" + color, 160, 131);
+        for (int i = 0; i < 6; ++i) {
+            String label = String(i * 20) + "%";
+            uint32_t brightColor = estimated.brightness == i ? TFT_BLUE : TFT_DARKGREY;
+            button(4 + i * 52, 86, 48, label.c_str(), brightColor);
+            uint32_t colorColor = estimated.color == i ? TFT_BLUE : TFT_DARKGREY;
+            button(4 + i * 52, 142, 48, label.c_str(), colorColor);
+        }
+        d.setFont(&fonts::efontJA_16);
+        button(4, 181, 153, "全灯", TFT_BLUE); button(162, 181, 153, "普段", TFT_BLUE);
+    }
+    d.setFont(&fonts::efontJA_12);
+    d.setTextColor(TFT_YELLOW, TFT_BLACK);
+    d.drawString(busy[selected] ? String("送信中 ") + progress[selected].load() + "/" + total[selected] : notices[selected], 160, 225);
 }
 
 void beginLighting() {
-    requests = xQueueCreate(1, sizeof(Job));
-    results = xQueueCreate(1, sizeof(Result));
+    requests = xQueueCreate(2, sizeof(Job));
+    results = xQueueCreate(2, sizeof(Result));
     if (!requests || !results ||
         xTaskCreate(senderTask, "remo", 12288, nullptr, 1, nullptr) != pdPASS) {
         requests = nullptr;
-        notice = "送信機能を開始できません";
+        notices[0] = notices[1] = "送信機能を開始できません";
     }
     redrawLighting();
-    Serial.printf("LIGHTING_READY: configured=%d\n", configured());
+    Serial.printf("LIGHTING_READY: kitchen=%d living=%d\n", configured(Id::Kitchen), configured(Id::Living));
+    Serial.printf("LOCAL_IR_READY: %d\n", REMO_LOCAL_HOST[0] && REMO_LOCAL_UP[0] && REMO_LOCAL_DOWN[0] && REMO_LOCAL_WARM[0] && REMO_LOCAL_COOL[0]);
 }
 
 void updateLighting() {
     Result result;
     if (results && xQueueReceive(results, &result, 0) == pdTRUE) {
-        for (int i = 0; i < result.completed; ++i) apply(estimated, result.job.signals[i]);
+        int n = index(result.job.id);
+        auto& estimated = states[n];
+        for (int i = 0; i < result.completed; ++i) {
+            if (n == 0) apply(estimated, result.job.signals[i]);
+            else light::applyLiving(estimated, result.job.signals[i]);
+        }
         if (result.completed == result.job.count) {
             if (result.job.syncLevel >= 0) estimated.brightness = result.job.syncLevel;
-            notice = "送信完了。実際と違う場合は合わせ直し";
+            if (result.job.syncColor >= 0) estimated.color = result.job.syncColor;
+            if (n == 1 && result.completed > 0) normal[1] = result.job.signals[0] == Signal::On || result.job.signals[0] == Signal::Normal;
+            notices[n] = "送信完了（状態は推定です）";
         } else {
-            uncertain(estimated, result.job.signals[result.completed]);
-            notice = result.code == 429 ? "送信制限：5分待ってから再操作" :
-                     "送信失敗 " + String(result.code) + "：状態を合わせ直してください";
+            Signal failed = result.job.signals[result.completed];
+            if (n == 0) uncertain(estimated, failed);
+            else {
+                uncertainLiving(estimated, failed);
+                normal[1] = false;
+            }
+            notices[n] = result.code == 429 ? "送信制限：5分待ってから再操作" :
+                "送信失敗 " + String(result.code) + "：実際の状態を確認してください";
         }
-        Serial.printf("REMO_RESULT: completed=%d/%d code=%d\n", result.completed, result.job.count, result.code);
-        busy = false;
+        Serial.printf("REMO_RESULT: device=%d completed=%d/%d code=%d\n", n, result.completed, result.job.count, result.code);
+        busy[n] = false;
         redrawLighting();
     }
-    static int lastProgress = -1;
-    if (busy && progress.load() != lastProgress) {
-        lastProgress = progress.load();
+    static int lastProgress[2] = {-1, -1};
+    if (busy[selected] && progress[selected].load() != lastProgress[selected]) {
+        lastProgress[selected] = progress[selected].load();
         redrawLighting();
     }
     const auto touch = M5.Touch.getDetail();
-    if (!busy && touch.wasPressed() && touch.y >= 84 && touch.y < 211 && touch.x >= 6) {
-        const int row = (touch.y - 84) / 44;
-        const int width = row == 2 ? 308 : 100;
-        const int column = (touch.x - 6) / (width + 4);
-        if (column < (row == 2 ? 1 : 3) && (touch.y - 84) % 44 < 39 &&
-            (touch.x - 6) % (width + 4) < width) {
-            handleButton(column, row);
-            redrawLighting();
-        }
+    if (!touch.wasPressed()) return;
+    if (touch.y >= 3 && touch.y < 31 && touch.x >= 4 && touch.x < 236) {
+        selected = touch.x < 122 ? 0 : 1;
+        redrawLighting();
+        return;
     }
+    if (busy[selected] || touch.x < 4 || touch.x >= 315) return;
+    if (selected == 1) {
+        if (touch.y >= 35 && touch.y < 66) {
+            int column = (touch.x - 4) / 105;
+            if ((touch.x - 4) % 105 < 101)
+                requestLighting(column == 0 ? Power::On : column == 1 ? Power::Night : Power::Off, -1, Id::Living);
+        } else if ((touch.y >= 86 && touch.y < 117) || (touch.y >= 142 && touch.y < 173)) {
+            int step = (touch.x - 4) / 52;
+            if (step < 6 && (touch.x - 4) % 52 < 48)
+                requestLivingPercent(touch.y < 117 ? Axis::Brightness : Axis::Color, step);
+        } else if (touch.y >= 181 && touch.y < 212) {
+            start(touch.x < 158 ? Signal::Full : Signal::Normal);
+        }
+    } else if (touch.y >= 68 && touch.y < 171) {
+        int row = (touch.y - 68) / 36;
+        if ((touch.y - 68) % 36 >= 31) return;
+        int column = row < 2 ? (touch.x - 4) / 105 : 0;
+        handleButton(column, row);
+    }
+    redrawLighting();
 }
 
-light::State getLightingState() {
-    return estimated;
-}
-
-bool isLightingBusy() {
-    return busy;
-}
-
-bool requestLighting(light::Power power, int brightness) {
-    const auto plan = light::planTarget(estimated, power, brightness);
+bool requestLivingPercent(Axis axis, int step) {
+    Plan plan = planLivingAxis(states[1], axis, step);
     bool accepted = false;
-    if (busy) notice = "送信中です。完了後に再操作してください";
-    else if (!plan.valid) notice = "点灯させてから下の合わせボタンを押す";
-    else if (plan.count == 0) {
-        notice = "推定では既にその状態です";
-        accepted = true;
-    } else accepted = enqueue(plan);
+    if (busy[1]) notices[1] = "送信中です。完了後に再操作してください";
+    else if (!plan.valid) notices[1] = "指定は0〜100%の20%刻みです";
+    else if (plan.count == 0) { notices[1] = "推定では既にその値です"; accepted = true; }
+    else {
+        Job job;
+        static_cast<Plan&>(job) = plan;
+        job.id = Id::Living;
+        accepted = enqueue(job);
+    }
+    redrawLighting();
+    return accepted;
+}
+
+light::State getLightingState(Id id) { return states[index(id)]; }
+bool isLightingBusy(Id id) { return busy[index(id)]; }
+
+bool requestLighting(Power power, int brightness, Id id) {
+    int n = index(id);
+    Plan plan = n == 0 ? light::planTarget(states[n], power, brightness) :
+                        light::planLiving(states[n], power, brightness);
+    bool accepted = false;
+    if (busy[n]) notices[n] = "送信中です。完了後に再操作してください";
+    else if (!plan.valid) notices[n] = n == 0 ? "点灯させてから合わせボタンを押す" : "明るさの段階数を設定してください";
+    else if (plan.count == 0) { notices[n] = "推定では既にその状態です"; accepted = true; }
+    else {
+        Job job;
+        static_cast<Plan&>(job) = plan;
+        job.id = id;
+        accepted = enqueue(job);
+    }
     redrawLighting();
     return accepted;
 }
