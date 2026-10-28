@@ -319,6 +319,12 @@ void updateLighting() {
     }
     const auto touch = M5.Touch.getDetail();
     if (!touch.wasPressed()) return;
+    // CoreS3 SE's touch panel extends 40 pixels below the visible LCD.
+    if (touch.y >= 240 && touch.y < 280 && touch.x >= 0 && touch.x < 320) {
+        selected = touch.x < 160 ? 0 : 1;
+        redrawLighting();
+        return;
+    }
     if (touch.y >= 3 && touch.y < 31 && touch.x >= 4 && touch.x < 236) {
         selected = touch.x < 122 ? 0 : 1;
         redrawLighting();
