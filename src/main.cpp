@@ -15,7 +15,6 @@ constexpr uint32_t kRetryDelayMs = 5000;
 enum class ConnectionState { Unconfigured, Connecting, Connected, Disconnected };
 ConnectionState state = ConnectionState::Unconfigured;
 uint32_t stateSince = 0;
-uint32_t lastRefresh = 0;
 
 void drawStatus() {
     redrawLighting();
@@ -67,9 +66,6 @@ void loop() {
         if (WiFi.status() == WL_CONNECTED) {
             if (state != ConnectionState::Connected) {
                 setState(ConnectionState::Connected);
-            } else if (now - lastRefresh >= 5000) {
-                drawStatus();
-                lastRefresh = now;
             }
         } else if (state == ConnectionState::Connected ||
                    (state == ConnectionState::Connecting && now - stateSince >= kConnectTimeoutMs)) {

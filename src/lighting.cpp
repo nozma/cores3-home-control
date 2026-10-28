@@ -37,6 +37,14 @@ std::atomic<int> progress[2]{};
 int total[2]{};
 String notices[2] = {"点灯させてから合わせボタンを押す", "照明を選んで操作してください"};
 int selected = 0;
+M5Canvas canvas(&M5.Display);
+bool canvasReady = false;
+
+lgfx::LGFXBase& drawingSurface() {
+    if (canvasReady) return canvas;
+    return M5.Display;
+}
+
 int index(Id id) { return static_cast<int>(id); }
 Id selectedId() { return static_cast<Id>(selected); }
 uint32_t sentAt[30]{};
@@ -163,7 +171,7 @@ void senderTask(void*) {
 }
 
 void button(int x, int y, int width, const char* label, uint32_t color = TFT_DARKGREY) {
-    auto& d = M5.Display;
+    auto& d = drawingSurface();
     uint32_t background = busy[selected] ? TFT_DARKGREY : color;
     d.fillRoundRect(x, y, width, 31, 4, background);
     d.setTextColor(TFT_WHITE, background);
@@ -224,7 +232,7 @@ void handleButton(int column, int row) {
 }  // namespace
 
 void redrawLighting() {
-    auto& d = M5.Display;
+    auto& d = drawingSurface();
     d.fillScreen(TFT_BLACK);
     d.setFont(&fonts::efontJA_16);
     d.setTextSize(1);
@@ -269,9 +277,13 @@ void redrawLighting() {
     d.setFont(&fonts::efontJA_12);
     d.setTextColor(TFT_YELLOW, TFT_BLACK);
     d.drawString(busy[selected] ? String("送信中 ") + progress[selected].load() + "/" + total[selected] : notices[selected], 160, 225);
+    // Present the completed frame without exposing the clear/draw steps.
+    if (canvasReady) canvas.pushSprite(0, 0);
 }
 
 void beginLighting() {
+    canvas.setColorDepth(16);
+    canvasReady = canvas.createSprite(M5.Display.width(), M5.Display.height()) != nullptr;
     requests = xQueueCreate(2, sizeof(Job));
     results = xQueueCreate(2, sizeof(Result));
     if (!requests || !results ||
