@@ -35,7 +35,7 @@ bool busy[2]{};
 bool normal[2]{};
 std::atomic<int> progress[2]{};
 int total[2]{};
-String notices[2] = {"点灯させてから合わせボタンを押す", "照明を選んで操作してください"};
+String notices[2] = {"点灯中にキャリブレーションを押す", "照明を選んで操作してください"};
 int selected = 0;
 M5Canvas canvas(&M5.Display);
 bool canvasReady = false;
@@ -233,51 +233,86 @@ void handleButton(int column, int row) {
 
 void redrawLighting() {
     auto& d = drawingSurface();
-    d.fillScreen(TFT_BLACK);
-    d.setFont(&fonts::efontJA_16);
+    constexpr uint32_t bg = 0x111e1c, surface = 0x233630, accent = 0xc8dda7;
+    constexpr uint32_t text = 0xe9f0e9, muted = 0x95aba0, selectedBg = 0x30483e;
+    d.fillScreen(bg);
     d.setTextSize(1);
+    d.setFont(&fonts::efontJA_12);
     d.setTextDatum(middle_center);
+    auto label = [&](const String& value, int x, int y, uint32_t color = 0xe9f0e9) {
+        d.setTextColor(color, bg);
+        d.drawString(value, x, y);
+    };
+    auto control = [&](int x, int y, int w, int h, const String& value,
+                       bool active = false, bool secondary = false) {
+        uint32_t fill = secondary ? 0x1b2b26 : active ? accent : surface;
+        d.fillRoundRect(x, y, w, h, 5, fill);
+        d.setTextColor(busy[selected] ? muted : active ? bg : secondary ? 0xa7baac : text, fill);
+        d.drawString(value, x + w / 2, y + h / 2);
+    };
     for (int n = 0; n < 2; ++n) {
-        uint32_t bg = selected == n ? TFT_BLUE : TFT_DARKGREY;
-        d.fillRoundRect(4 + n * 118, 3, 114, 28, 4, bg);
-        d.setTextColor(TFT_WHITE, bg);
-        d.drawString(n == 0 ? "キッチン" : "リビング", 61 + n * 118, 17);
+        d.fillRoundRect(8 + n * 76, 8, 72, 26, 6, selected == n ? selectedBg : bg);
+        d.setTextColor(selected == n ? text : muted, selected == n ? selectedBg : bg);
+        d.drawString(n == 0 ? "キッチン" : "リビング", 44 + n * 76, 21);
     }
+    bool connected = WiFi.status() == WL_CONNECTED;
+    d.fillCircle(266, 21, 2, connected ? accent : 0xe6bb74);
+    label(connected ? "接続中" : "未接続", 291, 21, muted);
+    const auto& state = states[selected];
+    d.setFont(&fonts::efontJA_16);
+    d.setTextDatum(middle_left);
+    label(state.power == Power::On ? "点灯中" : powerName(state.power), 10, 49);
+    d.setTextDatum(middle_center);
     d.setFont(&fonts::efontJA_12);
-    d.setTextColor(WiFi.status() == WL_CONNECTED ? TFT_GREEN : TFT_YELLOW, TFT_BLACK);
-    d.drawString(WiFi.status() == WL_CONNECTED ? "Wi-Fi接続" : "Wi-Fi待ち", 278, 17);
-    const auto& estimated = states[selected];
-    d.setTextColor(TFT_WHITE, TFT_BLACK);
+    for (int i = 0; i < 3; ++i) {
+        Power power = i == 0 ? Power::On : i == 1 ? Power::Night : Power::Off;
+        control(8 + i * 103, 64, 98, 28,
+                i == 0 ? "点灯" : i == 1 ? "常夜灯" : "消灯", state.power == power);
+    }
+    auto axisLabel = [&](const char* name, const String& value, int y) {
+        d.setTextDatum(middle_left); label(name, 10, y, muted);
+        d.setTextDatum(middle_right); label(value, 310, y);
+        d.setTextDatum(middle_center);
+    };
     if (selected == 0) {
-        String level = estimated.brightness < 0 ? "未確認" : String((estimated.brightness + 1) * 20) + "%";
-        d.setFont(&fonts::efontJA_16);
-        d.drawString(String(powerName(estimated.power)) + "（推定）  明るさ：" + level, 160, 48);
-        button(4, 68, 101, "点灯"); button(109, 68, 101, "常夜灯"); button(214, 68, 101, "消灯");
-        button(4, 104, 101, "暗く"); button(109, 104, 101, "明るく"); button(214, 104, 101, "電源1回");
-        button(4, 140, 311, "点灯中に合わせる（最大へ）", TFT_BLUE);
-    } else {
-        d.setFont(&fonts::efontJA_16);
-        button(4, 35, 101, "点灯"); button(109, 35, 101, "常夜灯"); button(214, 35, 101, "消灯");
-        d.setFont(&fonts::efontJA_12);
-        d.setTextColor(TFT_WHITE, TFT_BLACK);
-        String brightness = estimated.brightness < 0 ? (normal[1] ? "普段設定" : "未確認") : String(estimated.brightness * 20) + "%";
-        String color = estimated.color < 0 ? (normal[1] ? "普段設定" : "未確認") : String(estimated.color * 20) + "%";
-        d.drawString(String(powerName(estimated.power)) + "（推定） 明るさ：" + brightness, 160, 77);
-        d.drawString("色（暖0% → 白100%）：" + color, 160, 131);
-        for (int i = 0; i < 6; ++i) {
-            String label = String(i * 20) + "%";
-            uint32_t brightColor = estimated.brightness == i ? TFT_BLUE : TFT_DARKGREY;
-            button(4 + i * 52, 86, 48, label.c_str(), brightColor);
-            uint32_t colorColor = estimated.color == i ? TFT_BLUE : TFT_DARKGREY;
-            button(4 + i * 52, 142, 48, label.c_str(), colorColor);
+        String value = state.brightness < 0 ? "未確認" : String((state.brightness + 1) * 20) + "%";
+        axisLabel("明るさ", value, 110);
+        for (int i = 0; i < 5; ++i) {
+            control(8 + i * 61, 122, 57, 25, String((i + 1) * 20) + "%", state.brightness == i);
         }
-        d.setFont(&fonts::efontJA_16);
-        button(4, 181, 153, "全灯", TFT_BLUE); button(162, 181, 153, "普段", TFT_BLUE);
+        control(10, 185, 116, 25, "キャリブレーション", false, true);
+        label("点灯中に押す", 165, 197, muted);
+        control(240, 185, 70, 25, "電源ボタン", false, true);
+    } else {
+        axisLabel("明るさ", state.brightness < 0 ? (normal[1] ? "普段設定" : "未確認") : String(state.brightness * 20) + "%", 104);
+        axisLabel("色", state.color < 0 ? (normal[1] ? "普段設定" : "未確認") : "", 151);
+        constexpr uint32_t colors[] = {0xffbd6b, 0xffd08c, 0xffdfb0, 0xffeacb, 0xfff2e3, 0xf4f8ff};
+        for (int i = 0; i < 6; ++i) {
+            int x = 8 + i * 51;
+            control(x, 114, 47, 25, String(i * 20) + "%", state.brightness == i);
+            d.fillRoundRect(x, 161, 47, 25, 4, colors[i]);
+            if (state.color == i) {
+                d.drawRoundRect(x, 161, 47, 25, 4, accent);
+                d.drawRoundRect(x + 1, 162, 45, 23, 3, bg);
+                d.drawLine(x + 18, 173, x + 22, 177, bg);
+                d.drawLine(x + 22, 177, x + 29, 169, bg);
+            }
+        }
+        control(8, 193, 149, 25, "全灯");
+        control(162, 193, 150, 25, "普段");
     }
-    d.setFont(&fonts::efontJA_12);
-    d.setTextColor(TFT_YELLOW, TFT_BLACK);
-    d.drawString(busy[selected] ? String("送信中 ") + progress[selected].load() + "/" + total[selected] : notices[selected], 160, 225);
-    // Present the completed frame without exposing the clear/draw steps.
+    // Explicit RGB888: an int literal selects the RGB565 color overload.
+    d.drawFastHLine(10, 219, 300, uint32_t{0x25302c});
+    d.setTextDatum(middle_left);
+    String notice = busy[selected] ? String("送信中 ") + progress[selected].load() + " / " + total[selected] : notices[selected];
+    // Keep long errors inside the footer without changing their stored detail.
+    while (d.textWidth(notice) > 298 && notice.length() > 0) {
+        int pos = notice.length() - 1;
+        while (pos > 0 && (static_cast<unsigned char>(notice[pos]) & 0xc0) == 0x80) --pos;
+        notice.remove(pos);
+    }
+    label(notice, 10, 230, accent);
+    d.setTextDatum(middle_center);
     if (canvasReady) canvas.pushSprite(0, 0);
 }
 
@@ -309,7 +344,7 @@ void updateLighting() {
             if (result.job.syncLevel >= 0) estimated.brightness = result.job.syncLevel;
             if (result.job.syncColor >= 0) estimated.color = result.job.syncColor;
             if (n == 1 && result.completed > 0) normal[1] = result.job.signals[0] == Signal::On || result.job.signals[0] == Signal::Normal;
-            notices[n] = "送信完了（状態は推定です）";
+            notices[n] = "送信完了";
         } else {
             Signal failed = result.job.signals[result.completed];
             if (n == 0) uncertain(estimated, failed);
@@ -337,29 +372,35 @@ void updateLighting() {
         redrawLighting();
         return;
     }
-    if (touch.y >= 3 && touch.y < 31 && touch.x >= 4 && touch.x < 236) {
-        selected = touch.x < 122 ? 0 : 1;
+    if (touch.y >= 8 && touch.y < 34 && touch.x >= 8 && touch.x < 156) {
+        selected = touch.x < 84 ? 0 : 1;
         redrawLighting();
         return;
     }
-    if (busy[selected] || touch.x < 4 || touch.x >= 315) return;
-    if (selected == 1) {
-        if (touch.y >= 35 && touch.y < 66) {
-            int column = (touch.x - 4) / 105;
-            if ((touch.x - 4) % 105 < 101)
-                requestLighting(column == 0 ? Power::On : column == 1 ? Power::Night : Power::Off, -1, Id::Living);
-        } else if ((touch.y >= 86 && touch.y < 117) || (touch.y >= 142 && touch.y < 173)) {
-            int step = (touch.x - 4) / 52;
-            if (step < 6 && (touch.x - 4) % 52 < 48)
-                requestLivingPercent(touch.y < 117 ? Axis::Brightness : Axis::Color, step);
-        } else if (touch.y >= 181 && touch.y < 212) {
-            start(touch.x < 158 ? Signal::Full : Signal::Normal);
+    if (busy[selected]) return;
+    auto inside = [&](int x, int y, int w, int h) {
+        return touch.x >= x && touch.x < x + w && touch.y >= y && touch.y < y + h;
+    };
+    for (int i = 0; i < 3; ++i) {
+        if (inside(8 + i * 103, 64, 98, 28)) {
+            requestLighting(i == 0 ? Power::On : i == 1 ? Power::Night : Power::Off, -1, selectedId());
         }
-    } else if (touch.y >= 68 && touch.y < 171) {
-        int row = (touch.y - 68) / 36;
-        if ((touch.y - 68) % 36 >= 31) return;
-        int column = row < 2 ? (touch.x - 4) / 105 : 0;
-        handleButton(column, row);
+    }
+    if (selected == 1) {
+        for (int i = 0; i < 6; ++i) {
+            if (inside(8 + i * 51, 114, 47, 25)) requestLivingPercent(Axis::Brightness, i);
+            if (inside(8 + i * 51, 161, 47, 25)) requestLivingPercent(Axis::Color, i);
+        }
+        if (inside(8, 193, 149, 25)) start(Signal::Full);
+        if (inside(162, 193, 150, 25)) start(Signal::Normal);
+    } else {
+        for (int i = 0; i < 5; ++i) {
+            if (!inside(8 + i * 61, 122, 57, 25)) continue;
+            if (states[0].power != Power::On) notices[0] = "点灯状態に合わせてから調光してください";
+            else requestLighting(Power::On, i, Id::Kitchen);
+        }
+        if (inside(10, 185, 116, 25)) handleButton(0, 2);
+        if (inside(240, 185, 70, 25)) handleButton(2, 1);
     }
     redrawLighting();
 }
@@ -389,7 +430,7 @@ bool requestLighting(Power power, int brightness, Id id) {
                         light::planLiving(states[n], power, brightness);
     bool accepted = false;
     if (busy[n]) notices[n] = "送信中です。完了後に再操作してください";
-    else if (!plan.valid) notices[n] = n == 0 ? "点灯させてから合わせボタンを押す" : "明るさの段階数を設定してください";
+    else if (!plan.valid) notices[n] = n == 0 ? "点灯中にキャリブレーションを押す" : "明るさの段階数を設定してください";
     else if (plan.count == 0) { notices[n] = "推定では既にその状態です"; accepted = true; }
     else {
         Job job;
