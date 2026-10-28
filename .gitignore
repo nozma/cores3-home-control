@@ -8,6 +8,8 @@
 
 # Build outputs (PlatformIO / ESP-IDF / Arduino)
 .pio/
+.venv/
+.platformio/
 build/
 cmake-build-*/
 sdkconfig.old
