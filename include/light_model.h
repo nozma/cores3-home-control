@@ -61,7 +61,7 @@ inline Plan planTarget(State state, Power desired, int brightness = -1) {
 }
 enum class Axis { Brightness, Color };
 constexpr int kLivingMax = 5;
-constexpr int kLivingCalibrationSets = 6;
+constexpr int kLivingCalibrationSets = 5;
 inline bool isAdjustment(Signal signal) {
     return signal == Signal::Up || signal == Signal::Down || signal == Signal::Warm || signal == Signal::Cool;
 }
@@ -78,7 +78,7 @@ inline Plan planLivingAxis(State state, Axis axis, int target) {
         plan.signals[plan.count++] = Signal::On;
         current = -1; // "Normal" restores the fixture's saved settings.
     }
-    if (target == 0 || target == kLivingMax || current < 0) {
+    if (current < 0) {
         int reference = target <= 2 ? 0 : kLivingMax;
         for (int i = 0; i < kLivingCalibrationSets; ++i)
             plan.signals[plan.count++] = reference == 0 ? down : up;

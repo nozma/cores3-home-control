@@ -11,17 +11,17 @@ int main() {
                 state.power = Power::On;
                 state.brightness = state.color = current;
                 auto plan = planLivingAxis(state, axis, target);
-                assert(plan.valid && plan.count <= 8);
-                if (target == 0 || target == 5) {
-                    assert(plan.count == 6); // Always recalibrate, even at the same endpoint.
-                    for (int i = 0; i < 6; ++i)
+                assert(plan.valid && plan.count <= 7);
+                if (current < 0 && (target == 0 || target == 5)) {
+                    assert(plan.count == 5);
+                    for (int i = 0; i < 5; ++i)
                         assert(plan.signals[i] == (axis == Axis::Brightness ?
                             (target == 0 ? Signal::Down : Signal::Up) :
                             (target == 0 ? Signal::Warm : Signal::Cool)));
                 } else if (current >= 0) {
                     assert(plan.count == (target > current ? target - current : current - target));
                 } else {
-                    assert(plan.count == 6 + (target <= 2 ? target : 5 - target));
+                    assert(plan.count == 5 + (target <= 2 ? target : 5 - target));
                 }
                 // Simulate every possible real starting position, including unknown estimates.
                 for (int actual = 0; actual <= 5; ++actual) {
@@ -40,7 +40,7 @@ int main() {
     state.power = Power::Off;
     state.brightness = state.color = 3;
     auto plan = planLivingAxis(state, Axis::Brightness, 2);
-    assert(plan.signals[0] == Signal::On && plan.count == 9);
+    assert(plan.signals[0] == Signal::On && plan.count == 8);
     assert(!planLivingAxis(state, Axis::Brightness, 6).valid);
     state.power = Power::On;
     uncertainLiving(state, Signal::Cool);
