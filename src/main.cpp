@@ -1,5 +1,6 @@
 #include <M5Unified.h>
 #include <WiFi.h>
+#include "lighting.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -16,36 +17,7 @@ uint32_t stateSince = 0;
 uint32_t lastRefresh = 0;
 
 void drawStatus() {
-    auto& display = M5.Display;
-    display.fillScreen(TFT_BLACK);
-    display.setTextDatum(middle_center);
-    display.setTextColor(TFT_WHITE, TFT_BLACK);
-    display.setTextSize(3);
-    display.drawString("Home Control", display.width() / 2, 35);
-    display.setTextSize(2);
-
-    const char* label = "Wi-Fi: Not configured";
-    uint32_t color = TFT_YELLOW;
-    if (state == ConnectionState::Connecting) {
-        label = "Wi-Fi: Connecting...";
-    } else if (state == ConnectionState::Connected) {
-        label = "Wi-Fi: Connected";
-        color = TFT_GREEN;
-    } else if (state == ConnectionState::Disconnected) {
-        label = "Wi-Fi: Disconnected";
-        color = TFT_RED;
-    }
-    display.setTextColor(color, TFT_BLACK);
-    display.drawString(label, display.width() / 2, 100);
-    display.setTextColor(TFT_WHITE, TFT_BLACK);
-    if (state == ConnectionState::Connected) {
-        display.drawString("IP: " + WiFi.localIP().toString(), display.width() / 2, 145);
-        display.drawString("Signal: " + String(WiFi.RSSI()) + " dBm", display.width() / 2, 180);
-    } else if (state == ConnectionState::Unconfigured) {
-        display.drawString("Set include/secrets.h", display.width() / 2, 155);
-    } else if (state == ConnectionState::Disconnected) {
-        display.drawString("Retrying in 5 sec", display.width() / 2, 155);
-    }
+    redrawLighting();
 }
 
 void setState(ConnectionState next) {
@@ -74,12 +46,14 @@ void setup() {
 
     M5.Display.setRotation(1);
     M5.Display.setBrightness(128);
+    beginLighting();
     if (WIFI_SSID[0] == '\0') {
         setState(ConnectionState::Unconfigured);
         return;
     }
     WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
+    configTime(0, 0, "pool.ntp.org", "time.google.com");
     // Reconnect explicitly so failures also have a bounded retry interval.
     WiFi.setAutoReconnect(false);
     startConnection();
@@ -104,5 +78,6 @@ void loop() {
             startConnection();
         }
     }
+    updateLighting();
     delay(20);
 }

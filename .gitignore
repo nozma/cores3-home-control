@@ -20,6 +20,7 @@ sdkconfig.old
 !.env.example
 secrets.h
 secrets.local.h
+remo_secrets.h
 
 # Logs
 *.log
