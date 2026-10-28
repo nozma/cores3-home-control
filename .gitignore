@@ -1,0 +1,23 @@
+# macOS / editors
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build outputs (PlatformIO / ESP-IDF / Arduino)
+.pio/
+build/
+cmake-build-*/
+sdkconfig.old
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+secrets.h
+secrets.local.h
+
+# Logs
+*.log
