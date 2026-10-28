@@ -3,7 +3,6 @@
 - 対象デバイスは M5Stack CoreS3 SE。
 - 開発環境は PlatformIO Core + Arduino + M5Unified。バージョンは `requirements.txt` と `platformio.ini` で固定する。
 - READMEはプロジェクト概要を簡潔に記載し、Codex向けの開発手順や注意事項はこのファイルで管理する。
-- 当面は `main` に直接コミット・プッシュしてよい。
 
 ## 設定情報の管理
 
