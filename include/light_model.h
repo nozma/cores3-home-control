@@ -29,4 +29,31 @@ inline void uncertain(State& state, Signal signal) {
     if (signal == Signal::Cycle) state.power = Power::Unknown;
     else state.brightness = -1;
 }
+
+struct Plan {
+    Signal signals[6]{};  // At most two power presses and four brightness presses.
+    int count = 0;
+    int syncLevel = -1;
+    bool valid = true;
+};
+inline int alexaBrightnessStep(uint8_t value) {
+    int level = (static_cast<int>(value) * 5 + 127) / 255;
+    return level > 0 ? level - 1 : 0;
+}
+inline Plan planTarget(State state, Power desired, int brightness = -1) {
+    Plan plan;
+    int powerPresses = pressesTo(state.power, desired);
+    if (powerPresses < 0 || brightness < -1 || brightness > kMaxStep ||
+        (brightness >= 0 && (desired != Power::On || state.brightness < 0))) {
+        plan.valid = false;
+        return plan;
+    }
+    for (int i = 0; i < powerPresses; ++i) plan.signals[plan.count++] = Signal::Cycle;
+    if (brightness >= 0) {
+        int diff = brightness - state.brightness;
+        Signal signal = diff > 0 ? Signal::Up : Signal::Down;
+        for (int i = 0; i < (diff < 0 ? -diff : diff); ++i) plan.signals[plan.count++] = signal;
+    }
+    return plan;
+}
 }  // namespace light

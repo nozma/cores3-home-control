@@ -16,7 +16,7 @@
 
 namespace {
 using namespace light;
-struct Job { Signal signal; int count; int syncLevel; };
+using Job = Plan;
 struct Result { Job job; int completed; int code; };
 QueueHandle_t requests = nullptr;
 QueueHandle_t results = nullptr;
@@ -88,7 +88,7 @@ void senderTask(void*) {
         for (int i = 0; i < job.count; ++i) {
             // Keep at least one second between signals, including separate jobs.
             while (hasSent && millis() - lastSent < 1000) vTaskDelay(pdMS_TO_TICKS(20));
-            result.code = sendSignal(job.signal);
+            result.code = sendSignal(job.signals[i]);
             if (result.code < 200 || result.code >= 300) break;
             ++result.completed;
             progress.store(result.completed);
@@ -107,17 +107,26 @@ void button(int column, int row, const char* label, uint32_t color = TFT_DARKGRE
     d.drawString(label, x + width / 2, y + 19);
 }
 
-void start(Signal signal, int count = 1, int syncLevel = -1) {
-    if (!requests || !results) { notice = "送信機能を開始できません"; return; }
-    if (!configured()) { notice = "remo_secrets.h を設定してください"; return; }
-    if (WiFi.status() != WL_CONNECTED) { notice = "Wi-Fi未接続です"; return; }
-    if (time(nullptr) < 1704067200) { notice = "時刻同期中です。少し待って再操作"; return; }
-    Job job{signal, count, syncLevel};
-    if (xQueueSend(requests, &job, 0) != pdTRUE) { notice = "送信待ちです"; return; }
+bool enqueue(const Job& job) {
+    if (busy) { notice = "送信中です。完了後に再操作してください"; return false; }
+    if (!requests || !results) { notice = "送信機能を開始できません"; return false; }
+    if (!configured()) { notice = "remo_secrets.h を設定してください"; return false; }
+    if (WiFi.status() != WL_CONNECTED) { notice = "Wi-Fi未接続です"; return false; }
+    if (time(nullptr) < 1704067200) { notice = "時刻同期中です。少し待って再操作"; return false; }
+    if (xQueueSend(requests, &job, 0) != pdTRUE) { notice = "送信待ちです"; return false; }
     busy = true;
-    total = count;
+    total = job.count;
     progress.store(0);
     notice = "送信中：照明にRemoを向けてください";
+    return true;
+}
+
+void start(Signal signal, int count = 1, int syncLevel = -1) {
+    Job job;
+    job.count = count;
+    job.syncLevel = syncLevel;
+    for (int i = 0; i < count; ++i) job.signals[i] = signal;
+    enqueue(job);
 }
 
 void target(Power desired) {
@@ -183,12 +192,12 @@ void beginLighting() {
 void updateLighting() {
     Result result;
     if (results && xQueueReceive(results, &result, 0) == pdTRUE) {
-        for (int i = 0; i < result.completed; ++i) apply(estimated, result.job.signal);
+        for (int i = 0; i < result.completed; ++i) apply(estimated, result.job.signals[i]);
         if (result.completed == result.job.count) {
             if (result.job.syncLevel >= 0) estimated.brightness = result.job.syncLevel;
             notice = "送信完了。実際と違う場合は合わせ直し";
         } else {
-            uncertain(estimated, result.job.signal);
+            uncertain(estimated, result.job.signals[result.completed]);
             notice = result.code == 429 ? "送信制限：5分待ってから再操作" :
                      "送信失敗 " + String(result.code) + "：状態を合わせ直してください";
         }
@@ -212,4 +221,25 @@ void updateLighting() {
             redrawLighting();
         }
     }
+}
+
+light::State getLightingState() {
+    return estimated;
+}
+
+bool isLightingBusy() {
+    return busy;
+}
+
+bool requestLighting(light::Power power, int brightness) {
+    const auto plan = light::planTarget(estimated, power, brightness);
+    bool accepted = false;
+    if (busy) notice = "送信中です。完了後に再操作してください";
+    else if (!plan.valid) notice = "点灯させてから下の合わせボタンを押す";
+    else if (plan.count == 0) {
+        notice = "推定では既にその状態です";
+        accepted = true;
+    } else accepted = enqueue(plan);
+    redrawLighting();
+    return accepted;
 }

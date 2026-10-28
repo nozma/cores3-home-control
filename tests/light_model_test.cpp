@@ -40,4 +40,25 @@ int main() {
         apply(state, Signal::Down);
         assert(state.brightness == 2);
     }
+    for (Power power : {Power::On, Power::Night, Power::Off}) {
+        for (int from = 0; from <= kMaxStep; ++from) {
+            for (int to = 0; to <= kMaxStep; ++to) {
+                state = {power, from};
+                auto plan = planTarget(state, Power::On, to);
+                assert(plan.valid && plan.count <= 6);
+                for (int i = 0; i < plan.count; ++i) apply(state, plan.signals[i]);
+                assert(state.power == Power::On && state.brightness == to);
+            }
+        }
+    }
+    assert(!planTarget({Power::Unknown, 4}, Power::On).valid);
+    assert(!planTarget({Power::On, -1}, Power::On, 3).valid);
+    assert(planTarget({Power::On, -1}, Power::Off).valid);
+    assert(planTarget({Power::Off, 2}, Power::Off).count == 0);
+    assert(alexaBrightnessStep(1) == 0);
+    assert(alexaBrightnessStep(51) == 0);
+    assert(alexaBrightnessStep(102) == 1);
+    assert(alexaBrightnessStep(153) == 2);
+    assert(alexaBrightnessStep(204) == 3);
+    assert(alexaBrightnessStep(255) == 4);
 }

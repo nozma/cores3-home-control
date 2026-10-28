@@ -1,6 +1,7 @@
 #include <M5Unified.h>
 #include <WiFi.h>
 #include "lighting.h"
+#include "alexa_control.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -79,5 +80,6 @@ void loop() {
         }
     }
     updateLighting();
+    updateAlexa();
     delay(20);
 }
