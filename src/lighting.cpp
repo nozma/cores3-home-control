@@ -256,8 +256,17 @@ void redrawLighting() {
         d.drawString(n == 0 ? "キッチン" : "リビング", 44 + n * 76, 21);
     }
     bool connected = WiFi.status() == WL_CONNECTED;
-    d.fillCircle(266, 21, 2, connected ? accent : 0xe6bb74);
-    label(connected ? "接続中" : "未接続", 291, 21, muted);
+    const uint32_t wifiColor = connected ? uint32_t{0xb9d58d} : uint32_t{0x819087};
+    d.drawArc(298, 28, 13, 11, 225, 315, wifiColor);
+    d.drawArc(298, 28, 8, 6, 225, 315, wifiColor);
+    d.fillCircle(298, 27, 2, wifiColor);
+    if (!connected) {
+        // Clear a gap behind the slash so the disconnected state stays legible.
+        d.drawLine(287, 13, 307, 30, bg);
+        d.drawLine(287, 14, 307, 31, bg);
+        d.drawLine(287, 12, 307, 29, wifiColor);
+        d.drawLine(287, 13, 307, 30, wifiColor);
+    }
     const auto& state = states[selected];
     d.setFont(&fonts::efontJA_16);
     d.setTextDatum(middle_left);
