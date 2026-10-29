@@ -362,8 +362,12 @@ void redrawLighting() {
 void beginLighting() {
     beginLightStorage();
     for (int n = 0; n < 2; ++n) {
-        if (loadLightState(static_cast<Id>(n), states[n], normal[n]))
+        const bool restored = loadLightState(static_cast<Id>(n), states[n], normal[n]);
+        if (restored)
             notices[n] = "保存した推定状態を復元しました";
+        Serial.printf("LIGHT_STATE_RESTORE: device=%d restored=%d power=%d brightness=%d color=%d normal=%d\n",
+                      n, restored, static_cast<int>(states[n].power), states[n].brightness,
+                      states[n].color, normal[n]);
     }
     canvas.setColorDepth(16);
     canvasReady = canvas.createSprite(M5.Display.width(), M5.Display.height()) != nullptr;
@@ -405,8 +409,12 @@ void updateLighting() {
                 result.code == 429 ? "送信制限：5分待ってから再操作" :
                 "送信失敗 " + String(result.code) + "：実際の状態を確認してください";
         }
-        if (!saveLightState(result.job.id, estimated, normal[n]))
+        const bool saved = saveLightState(result.job.id, estimated, normal[n]);
+        if (!saved)
             notices[n] = "状態保存失敗：再起動後は一部未確認";
+        Serial.printf("LIGHT_STATE_SAVE: device=%d saved=%d power=%d brightness=%d color=%d normal=%d\n",
+                      n, saved, static_cast<int>(estimated.power), estimated.brightness,
+                      estimated.color, normal[n]);
         Serial.printf("REMO_RESULT: device=%d completed=%d/%d code=%d\n", n, result.completed, result.job.count, result.code);
         busy[n] = false;
         redrawLighting();
