@@ -316,14 +316,16 @@ void redrawLighting() {
             label(value,169,y+13);
             control(250,y,60,27,"＋");
         }
-        label(automationNext(),160,199,accent);
         String message=automationStatus();
-        while (d.textWidth(message)>300 && message.length()) {
+        while (d.textWidth(message)>298 && message.length()) {
             int pos=message.length()-1;
             while(pos>0 && (static_cast<unsigned char>(message[pos])&0xc0)==0x80) --pos;
             message.remove(pos);
         }
-        label(message,160,228,muted);
+        d.drawFastHLine(10, 219, 300, uint32_t{0x25302c});
+        d.setTextDatum(middle_left);
+        label(message,10,230,accent);
+        d.setTextDatum(middle_center);
         if (canvasReady) canvas.pushSprite(0,0);
         return;
     }
