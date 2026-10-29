@@ -102,14 +102,6 @@ int sendLocal(Signal signal) {
     return code;
 }
 
-const char* powerName(Power power) {
-    switch (power) {
-        case Power::On: return "点灯";
-        case Power::Night: return "常夜灯";
-        case Power::Off: return "消灯";
-        default: return "未確認";
-    }
-}
 bool validUrl(const char* value) {
     String url(value);
     return url.startsWith("https://api.nature.global/1/signals/") && url.endsWith("/send");
@@ -472,41 +464,29 @@ void redrawLighting() {
         d.drawString(n == 0 ? "キッチン" : "リビング", 57 + n * 103, 55);
     }
     const auto& state = states[selected];
-    d.setTextDatum(middle_right);
-    label(state.power == Power::On ? "点灯中" : powerName(state.power), 310, 55, muted);
-    d.setTextDatum(middle_center);
     for (int i = 0; i < 3; ++i) {
         Power power = i == 0 ? Power::On : i == 1 ? Power::Night : Power::Off;
-        control(8 + i * 103, 74, 98, 26,
+        control(8 + i * 103, 74, 98, 30,
                 i == 0 ? "点灯" : i == 1 ? "常夜灯" : "消灯", state.power == power);
     }
-    auto axisLabel = [&](const char* name, const String& value, int y) {
-        d.setTextDatum(middle_left); label(name, 10, y, muted);
-        d.setTextDatum(middle_right); label(value, 310, y);
-        d.setTextDatum(middle_center);
-    };
     if (selected == 0) {
-        String value = state.brightness < 0 ? "未確認" : String((state.brightness + 1) * 20) + "%";
-        axisLabel("明るさ", value, 115);
         for (int i = 0; i < 5; ++i) {
-            control(8 + i * 61, 128, 57, 28, String((i + 1) * 20) + "%", state.brightness == i);
+            control(8 + i * 61, 113, 57, 32, String((i + 1) * 20) + "%", state.brightness == i);
         }
         control(10, 185, 116, 25, "キャリブレーション", false, true);
         label("点灯中に押す", 165, 197, muted);
         control(240, 185, 70, 25, "電源ボタン", false, true);
     } else {
-        axisLabel("明るさ", state.brightness < 0 ? (normal[1] ? "普段設定" : "未確認") : String(state.brightness * 20) + "%", 110);
-        axisLabel("色", state.color < 0 ? (normal[1] ? "普段設定" : "未確認") : "", 154);
         constexpr uint32_t colors[] = {0xffbd6b, 0xffd08c, 0xffdfb0, 0xffeacb, 0xfff2e3, 0xf4f8ff};
         for (int i = 0; i < 6; ++i) {
             int x = 8 + i * 51;
-            control(x, 121, 47, 25, String(i * 20) + "%", state.brightness == i);
-            d.fillRoundRect(x, 165, 47, 25, 4, colors[i]);
+            control(x, 113, 47, 32, String(i * 20) + "%", state.brightness == i);
+            d.fillRoundRect(x, 155, 47, 32, 4, colors[i]);
             if (state.color == i) {
-                d.drawRoundRect(x, 165, 47, 25, 4, accent);
-                d.drawRoundRect(x + 1, 166, 45, 23, 3, bg);
-                d.drawLine(x + 18, 177, x + 22, 181, bg);
-                d.drawLine(x + 22, 181, x + 29, 173, bg);
+                d.drawRoundRect(x, 155, 47, 32, 4, accent);
+                d.drawRoundRect(x + 1, 156, 45, 30, 3, bg);
+                d.drawLine(x + 18, 171, x + 22, 175, bg);
+                d.drawLine(x + 22, 175, x + 29, 167, bg);
             }
         }
         control(8, 195, 149, 23, "全灯");
@@ -632,20 +612,20 @@ void updateLighting() {
         return touch.x >= x && touch.x < x + w && touch.y >= y && touch.y < y + h;
     };
     for (int i = 0; i < 3; ++i) {
-        if (inside(8 + i * 103, 74, 98, 26)) {
+        if (inside(8 + i * 103, 74, 98, 30)) {
             requestLighting(i == 0 ? Power::On : i == 1 ? Power::Night : Power::Off, -1, selectedId());
         }
     }
     if (selected == 1) {
         for (int i = 0; i < 6; ++i) {
-            if (inside(8 + i * 51, 121, 47, 25)) requestLivingPercent(Axis::Brightness, i);
-            if (inside(8 + i * 51, 165, 47, 25)) requestLivingPercent(Axis::Color, i);
+            if (inside(8 + i * 51, 113, 47, 32)) requestLivingPercent(Axis::Brightness, i);
+            if (inside(8 + i * 51, 155, 47, 32)) requestLivingPercent(Axis::Color, i);
         }
         if (inside(8, 195, 149, 23)) start(Signal::Full);
         if (inside(162, 195, 150, 23)) start(Signal::Normal);
     } else {
         for (int i = 0; i < 5; ++i) {
-            if (!inside(8 + i * 61, 128, 57, 28)) continue;
+            if (!inside(8 + i * 61, 113, 57, 32)) continue;
             if (states[0].power != Power::On) notices[0] = "点灯状態に合わせてから調光してください";
             else requestLighting(Power::On, i, Id::Kitchen);
         }
