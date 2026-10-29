@@ -1,4 +1,5 @@
 #include "lighting.h"
+#include "error_log.h"
 #include "light_model.h"
 #include "remo_ca.h"
 #if __has_include("remo_local.h")
@@ -27,7 +28,7 @@
 namespace {
 using namespace light;
 struct Job : Plan { Id id = Id::Kitchen; };
-struct Result { Job job; int completed; int code; };
+struct Result { Job job; int completed; int code; LightingError error; };
 QueueHandle_t requests = nullptr;
 QueueHandle_t results = nullptr;
 State states[2];
@@ -70,12 +71,16 @@ int sendLocal(Signal signal) {
     WiFiClient client;
     HTTPClient http;
     http.setConnectTimeout(800);
-    http.setTimeout(1200);
+    // Remo may respond only after emitting the burst; allow for LAN latency too.
+    http.setTimeout(localDuration(signal) + 5000);
     http.setReuse(false);
     if (!http.begin(client, String("http://") + REMO_LOCAL_HOST + "/messages")) return -102;
     http.addHeader("X-Requested-With", "XMLHttpRequest");
     http.addHeader("Content-Type", "application/json");
+    const uint32_t started = millis();
     int code = http.POST(String(localPayload(signal)));
+    Serial.printf("REMO_LOCAL_RESULT: signal=%d elapsed_ms=%lu code=%d\n",
+                  static_cast<int>(signal), static_cast<unsigned long>(millis() - started), code);
     http.end();
     // Even an uncertain HTTP result may have started IR transmission.
     localUntil = millis() + localDuration(signal) + 80;
@@ -135,7 +140,10 @@ int sendSignal(Id id, Signal signal) {
     sentAt[sentCount % 30] = millis();
     ++sentCount;
     if (payload.length()) http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    const uint32_t started = millis();
     const int code = http.POST(payload);
+    Serial.printf("REMO_CLOUD_RESULT: device=%d signal=%d elapsed_ms=%lu code=%d\n",
+                  index(id), static_cast<int>(signal), static_cast<unsigned long>(millis() - started), code);
     http.end();
     lastSent = millis();
     hasSent = true;
@@ -148,20 +156,39 @@ int sendSignal(Id id, Signal signal) {
 
 void senderTask(void*) {
     Job job;
+    uint32_t previousEnd = 0;
+    bool attempted = false;
     while (true) {
         if (xQueueReceive(requests, &job, portMAX_DELAY) != pdTRUE) continue;
-        Result result{job, 0, 200};
+        Result result{job, 0, 200, {}};
         for (int i = 0; i < job.count; ++i) {
             // All send paths share this worker so emitted IR never overlaps.
             while (localPending && static_cast<int32_t>(localUntil - millis()) > 0)
                 vTaskDelay(pdMS_TO_TICKS(10));
             localPending = false;
-            if (job.id == Id::Living && isAdjustment(job.signals[i])) {
+            const bool local = job.id == Id::Living && isAdjustment(job.signals[i]);
+            if (!local)
+                while (hasSent && millis() - lastSent < 1000) vTaskDelay(pdMS_TO_TICKS(20));
+            const uint32_t started = millis();
+            const time_t now = time(nullptr);
+            result.error.unixTime = now >= 1704067200 ? now : 0;
+            result.error.uptimeMs = started;
+            result.error.gapMs = attempted ? static_cast<int32_t>(started - previousEnd) : -1;
+            result.error.rssi = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+            result.error.device = index(job.id);
+            result.error.signal = static_cast<uint8_t>(job.signals[i]);
+            result.error.local = local;
+            result.error.completed = i;
+            result.error.total = job.count;
+            if (local) {
                 result.code = sendLocal(job.signals[i]);
             } else {
-                while (hasSent && millis() - lastSent < 1000) vTaskDelay(pdMS_TO_TICKS(20));
                 result.code = sendSignal(job.id, job.signals[i]);
             }
+            previousEnd = millis();
+            attempted = true;
+            result.error.elapsedMs = previousEnd - started;
+            result.error.code = result.code;
             if (result.code < 200 || result.code >= 300) break;
             ++result.completed;
             progress[index(job.id)].store(result.completed);
@@ -355,13 +382,15 @@ void updateLighting() {
             if (n == 1 && result.completed > 0) normal[1] = result.job.signals[0] == Signal::On || result.job.signals[0] == Signal::Normal;
             notices[n] = "送信完了";
         } else {
+            saveLightingError(result.error);
             Signal failed = result.job.signals[result.completed];
             if (n == 0) uncertain(estimated, failed);
             else {
                 uncertainLiving(estimated, failed);
                 normal[1] = false;
             }
-            notices[n] = result.code == 429 ? "送信制限：5分待ってから再操作" :
+            notices[n] = result.code == HTTPC_ERROR_READ_TIMEOUT ? "応答待ち時間切れ：実際の状態を確認" :
+                result.code == 429 ? "送信制限：5分待ってから再操作" :
                 "送信失敗 " + String(result.code) + "：実際の状態を確認してください";
         }
         Serial.printf("REMO_RESULT: device=%d completed=%d/%d code=%d\n", n, result.completed, result.job.count, result.code);
