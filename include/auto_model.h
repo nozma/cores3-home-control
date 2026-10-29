@@ -27,6 +27,9 @@ inline bool due(int64_t now, int64_t& highWater, bool force, bool isEvent) {
 inline int ramp(int start, int maximum, int elapsed) {
     return start + (maximum - start) * elapsed / 60;
 }
+inline bool kitchenBedtimeNight(const Settings& s, int minute) {
+    return minute >= s.bed - 15 && minute < s.bed;
+}
 // Fade 40% to minimum over 105 minutes; hold minimum until bedtime.
 inline int bedtimeLevel(const Settings& s, int minute, light::Id id) {
     int elapsed = minute - (s.bed - 120);

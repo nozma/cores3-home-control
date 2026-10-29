@@ -96,7 +96,8 @@ void updateAutomation() {
     if (due(now,highWater,immediate,event(settings,m,saved[0],saved[1],saved[2]))) {
         pending[0] = pending[1] = true;
         outcomes[0] = outcomes[1] = "待機";
-        capture[0] = capture[1] = !enabling && m == settings.bed%1440;
+        capture[0] = !enabling && m == settings.bed-15;
+        capture[1] = !enabling && m == settings.bed%1440;
         deadline = now; // At most the remainder of this minute; never replay stale events.
         status = "自動制御を実行中";
     }
@@ -118,7 +119,10 @@ void updateAutomation() {
             case Phase::Night: power=light::Power::Night; break;
             case Phase::Day: b=n==0?4:5; c=5; full=n==1; break;
             case Phase::Evening: b=n==0?2:3; c=2; break;
-            case Phase::Late: b=bedtimeLevel(settings,m,id); c=0; break;
+            case Phase::Late:
+                if (n==0 && kitchenBedtimeNight(settings,m)) power=light::Power::Night;
+                else b=bedtimeLevel(settings,m,id);
+                c=0; break;
             case Phase::Dawn:
                 b=ramp(saved[n==0?0:1],n==0?4:5,m-settings.wake);
                 c=ramp(saved[2],5,m-settings.wake); restore=n==1 && m==settings.wake; break;

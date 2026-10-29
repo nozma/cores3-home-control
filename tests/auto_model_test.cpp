@@ -71,6 +71,10 @@ int main() {
         assert(bedtimeLevel(t,bed-120,Id::Kitchen)==1);
         assert(bedtimeLevel(t,bed-68,Id::Living)==2);
         assert(bedtimeLevel(t,bed-67,Id::Living)==1);
+        assert(!kitchenBedtimeNight(t,bed-16));
+        assert(kitchenBedtimeNight(t,bed-15));
+        assert(kitchenBedtimeNight(t,bed-1));
+        assert(!kitchenBedtimeNight(t,bed));
         assert(event(t,bed-15,1,2,0));
         assert(!event(t,bed-14,1,2,0));
     }
