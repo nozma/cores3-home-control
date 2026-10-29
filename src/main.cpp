@@ -1,6 +1,7 @@
 #include <M5Unified.h>
 #include <WiFi.h>
 #include "lighting.h"
+#include "auto_control.h"
 #include "alexa_control.h"
 #include "error_log.h"
 
@@ -49,6 +50,7 @@ void setup() {
     M5.Display.setRotation(1);
     M5.Display.setBrightness(128);
     beginLighting();
+    beginAutomation();
     if (WIFI_SSID[0] == '\0') {
         setState(ConnectionState::Unconfigured);
         return;
@@ -79,6 +81,7 @@ void loop() {
     }
     updateLighting();
     updateAlexa();
+    updateAutomation();
     updateErrorLogConsole();
     delay(20);
 }

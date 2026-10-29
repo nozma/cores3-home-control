@@ -1,5 +1,6 @@
 #include "alexa_control.h"
 #include "lighting.h"
+#include "auto_control.h"
 #define ESPALEXA_MAXDEVICES 2
 #define ESPALEXA_NO_SUBPAGE
 #include <Espalexa.h>
@@ -107,8 +108,10 @@ void handleRequest() {
     const uint8_t value = hasBrightness ? request["bri"].as<int>() + 1 : device.getLastValue();
     const int brightness = on && hasBrightness ?
         (n == 0 ? light::alexaBrightnessStep(value) : light::livingStep(value)) : -1;
-    const bool queued = target.pending && isLightingBusy(deviceId);
-    const bool duplicate = queued && on == target.pendingOn &&
+    automationManual(deviceId);
+    const bool hadPending = target.pending;
+    const bool queued = isLightingBusy(deviceId);
+    const bool duplicate = queued && hadPending && on == target.pendingOn &&
         (brightness < 0 || brightness == target.pendingBrightness);
     bool accepted = queued || requestLighting(on ? light::Power::On : light::Power::Off, brightness, deviceId);
     Serial.printf("ALEXA_COMMAND: accepted=%d queued=%d duplicate=%d on=%d level=%d\n",
@@ -117,7 +120,7 @@ void handleRequest() {
     if (queued && !duplicate) target.followUp = true;
     target.pending = isLightingBusy(deviceId);
     // A separate on-only request must not discard a brightness target already accepted.
-    if (!queued || hasBrightness || !on) target.pendingBrightness = brightness;
+    if (!queued || !hadPending || hasBrightness || !on) target.pendingBrightness = brightness;
     target.pendingOn = on;
     if (hasBrightness) device.setValue(value);
     device.setState(on);

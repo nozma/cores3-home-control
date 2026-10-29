@@ -107,7 +107,7 @@ inline void applyLiving(State& state, Signal signal) {
     if (signal == Signal::Full) {
         state.power = Power::On;
         state.brightness = kLivingMax;
-        state.color = -1; // Full-light color behavior is not calibrated.
+        state.color = kLivingMax; // Full light is treated as the whitest endpoint.
     } else if (signal == Signal::On || signal == Signal::Normal) {
         state.power = Power::On;
         state.brightness = state.color = -1;
