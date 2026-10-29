@@ -3,6 +3,8 @@
 #include "error_log.h"
 #include "light_storage.h"
 #include "light_model.h"
+#include "environment_model.h"
+#include "environment_control.h"
 #include "remo_ca.h"
 #if __has_include("remo_local.h")
 #include "remo_local.h"
@@ -33,12 +35,23 @@ struct Job : Plan { Id id = Id::Kitchen; bool automatic = false; };
 struct Result { Job job; int completed; int code; LightingError error; };
 QueueHandle_t requests = nullptr;
 QueueHandle_t results = nullptr;
+QueueHandle_t environmentResults = nullptr;
+EnvironmentSample environment;
+int environmentCode = 0;
+bool environmentBrightness = false;
+uint32_t environmentFetchedAt = 0;
+bool environmentAttempted = false;
+constexpr uint32_t kEnvironmentInterval = 60000;
+
 State states[2];
 bool busy[2]{};
 bool normal[2]{};
 std::atomic<int> progress[2]{};
 int total[2]{};
 String notices[2] = {"点灯中にキャリブレーションを押す", "照明を選んで操作してください"};
+enum class Page { Remote, Automation, Environment };
+Page page = Page::Remote;
+// Remember the selected room independently of the top-level page.
 int selected = 0;
 M5Canvas canvas(&M5.Display);
 bool canvasReady = false;
@@ -90,14 +103,6 @@ int sendLocal(Signal signal) {
     return code;
 }
 
-const char* powerName(Power power) {
-    switch (power) {
-        case Power::On: return "点灯";
-        case Power::Night: return "常夜灯";
-        case Power::Off: return "消灯";
-        default: return "未確認";
-    }
-}
 bool validUrl(const char* value) {
     String url(value);
     return url.startsWith("https://api.nature.global/1/signals/") && url.endsWith("/send");
@@ -156,12 +161,67 @@ int sendSignal(Id id, Signal signal) {
     return code;
 }
 
+// Runs only on the common worker; the API budget is shared with lighting.
+void fetchEnvironment() {
+    EnvironmentSample sample;
+    const uint32_t now = millis();
+    if ((rateLimited && now - rateLimitedAt < 300000) ||
+        (sentCount >= 30 && now - sentAt[sentCount % 30] < 300000)) {
+        sample.code = 429;
+    } else {
+        WiFiClientSecure client;
+        client.setCACert(kRemoRootCa);
+        client.setHandshakeTimeout(8);
+        HTTPClient http;
+        http.setConnectTimeout(8000);
+        http.setTimeout(8000);
+        if (!http.begin(client, "https://api.nature.global/1/devices")) sample.code = -102;
+        else {
+            http.addHeader("Authorization", String("Bearer ") + REMO_ACCESS_TOKEN);
+            http.addHeader("accept", "application/json");
+            sentAt[sentCount % 30] = millis();
+            ++sentCount;
+            sample.code = http.GET();
+            if (sample.code == 200) {
+                // Filter out identifiers and unrelated device metadata.
+                StaticJsonDocument<256> filter;
+                filter[0]["name"] = true;
+                filter[0]["newest_events"] = true;
+                DynamicJsonDocument doc(8192);
+                if (deserializeJson(doc, http.getString(), DeserializationOption::Filter(filter)) ||
+                    !doc.is<JsonArray>()) sample.code = -103;
+                else {
+                    sample = parseEnvironment(doc.as<JsonArray>());
+                }
+            }
+            http.end();
+            lastSent = millis();
+            hasSent = true;
+            if (sample.code == 429) {
+                rateLimited = true;
+                rateLimitedAt = millis();
+            }
+        }
+    }
+    xQueueOverwrite(environmentResults, &sample);
+}
+
 void senderTask(void*) {
     Job job;
     uint32_t previousEnd = 0;
     bool attempted = false;
     while (true) {
-        if (xQueueReceive(requests, &job, portMAX_DELAY) != pdTRUE) continue;
+        if (xQueueReceive(requests, &job, pdMS_TO_TICKS(100)) != pdTRUE) {
+            serviceEnvironmentStorage();
+            if (environmentResults && REMO_ACCESS_TOKEN[0] &&
+                WiFi.status() == WL_CONNECTED && time(nullptr) >= 1704067200 &&
+                (!environmentAttempted || millis() - environmentFetchedAt >= kEnvironmentInterval)) {
+                environmentAttempted = true;
+                fetchEnvironment();
+                environmentFetchedAt = millis();
+            }
+            continue;
+        }
         Result result{job, 0, 200, {}};
         for (int i = 0; i < job.count; ++i) {
             // All send paths share this worker so emitted IR never overlaps.
@@ -305,26 +365,42 @@ void drawFooter(String message) {
 void redrawLighting() {
     auto& d = drawingSurface();
     constexpr uint32_t bg = 0x111e1c, surface = 0x233630, accent = 0xc8dda7;
-    constexpr uint32_t text = 0xe9f0e9, muted = 0x95aba0, selectedBg = 0x30483e;
+    constexpr uint32_t text = 0xe9f0e9, muted = 0x95aba0, selectedBg = 0x30434c;
     d.fillScreen(bg);
     d.setTextSize(1);
     d.setFont(&fonts::efontJA_12);
     d.setTextDatum(middle_center);
-    auto label = [&](const String& value, int x, int y, uint32_t color = 0xe9f0e9) {
-        d.setTextColor(color, bg);
+    auto label = [&](const String& value, int x, int y, uint32_t color = 0xe9f0e9,
+                     uint32_t background = 0x111e1c) {
+        d.setTextColor(color, background);
         d.drawString(value, x, y);
     };
+    struct ControlPalette { uint32_t panel, button, active, text, ink, caption; };
+    constexpr ControlPalette powerColors{0x1c3028, 0x29443a, 0xb9d7bc, 0xdeebe0, 0x14271b, 0xa7baac};
+    constexpr ControlPalette brightnessColors{0x2e291e, 0x493c2a, 0xead09c, 0xeadfc9, 0x2c2619, 0xb9ad96};
+    constexpr ControlPalette utilityColors{0x1e292f, 0x29383e, 0x8fa9b6, 0xc0d0d7, 0x142127, 0xa0b0b8};
     auto control = [&](int x, int y, int w, int h, const String& value,
-                       bool active = false, bool secondary = false) {
-        uint32_t fill = secondary ? 0x1b2b26 : active ? accent : surface;
+                       bool active = false, bool secondary = false, const String& hint = "",
+                       const ControlPalette* palette = nullptr) {
+        uint32_t fill = palette ? (active ? palette->active : palette->button) :
+                        secondary ? 0x1b2b26 : active ? accent : surface;
         d.fillRoundRect(x, y, w, h, 5, fill);
-        d.setTextColor((selected < 2 && busy[selected]) ? muted : active ? bg : secondary ? 0xa7baac : text, fill);
-        d.drawString(value, x + w / 2, y + h / 2);
+        const bool sending = page == Page::Remote && busy[selected];
+        d.setTextColor(active ? (palette ? palette->ink : bg) : sending ? muted :
+                       palette ? palette->text : secondary ? 0xa7baac : text, fill);
+        d.setFont(&fonts::efontJA_16);
+        d.drawString(value, x + w / 2, y + h / 2 - (hint.length() ? 8 : 0));
+        d.setFont(&fonts::efontJA_12);
+        if (hint.length()) {
+            d.setTextColor(palette ? palette->caption : muted, fill);
+            d.drawString(hint, x + w / 2, y + h / 2 + 10);
+        }
     };
     for (int n = 0; n < 3; ++n) {
-        d.fillRoundRect(8 + n * 76, 8, 72, 26, 6, selected == n ? selectedBg : bg);
-        d.setTextColor(selected == n ? text : muted, selected == n ? selectedBg : bg);
-        d.drawString(n == 0 ? "キッチン" : n == 1 ? "リビング" : "自動制御", 44 + n * 76, 21);
+        const bool active = static_cast<int>(page) == n;
+        d.fillRoundRect(8 + n * 92, 8, 88, 26, 6, active ? selectedBg : bg);
+        d.setTextColor(active ? text : muted, active ? selectedBg : bg);
+        d.drawString(n == 0 ? "リモコン" : n == 1 ? "自動制御" : "環境", 52 + n * 92, 21);
     }
     bool connected = WiFi.status() == WL_CONNECTED;
     const uint32_t wifiColor = connected ? uint32_t{0xb9d58d} : uint32_t{0x819087};
@@ -338,67 +414,76 @@ void redrawLighting() {
         d.drawLine(287, 12, 307, 29, wifiColor);
         d.drawLine(287, 13, 307, 30, wifiColor);
     }
-    if (selected == 2) {
+    if (page == Page::Environment) {
+        drawFooter(drawEnvironmentGraph(d, environment, environmentCode, connected, environmentBrightness));
+        if (canvasReady) canvas.pushSprite(0, 0);
+        return;
+    }
+    if (page == Page::Automation) {
         const auto& cfg = automationSettings();
         control(8, 43, 304, 29, cfg.enabled ? "自動制御：有効" : "自動制御：無効", cfg.enabled);
         int values[] = {cfg.wake, cfg.work, cfg.bed};
         const char* names[] = {"起床", "終業", "就寝"};
         for (int i=0; i<3; ++i) {
-            int y=81+i*35;
-            label(names[i], 33, y+13);
-            control(68,y,45,27,"−");
+            int y=82+i*44;
+            constexpr uint32_t rowBg = 0x1d2b2a;
+            d.fillRoundRect(8, y-4, 304, 40, 6, rowBg);
+            d.setFont(&fonts::efontJA_16);
+            label(names[i], 33, y+16, text, rowBg);
+            d.setFont(&fonts::efontJA_12);
+            control(80,y,48,32,"−");
             char value[8]; snprintf(value,sizeof(value),"%02d:%02d",values[i]/60,values[i]%60);
             d.setFont(&fonts::efontJA_16);
-            label(value,169,y+13);
+            label(value,192,y+16, text, rowBg);
             d.setFont(&fonts::efontJA_12);
-            control(250,y,60,27,"＋");
+            control(264,y,48,32,"＋");
         }
         drawFooter(automationStatus());
         if (canvasReady) canvas.pushSprite(0,0);
         return;
     }
+    // Room navigation stays enabled while either light is sending.
+    d.fillRoundRect(8, 42, 304, 28, 6, uint32_t{0x1b2b26});
+    for (int n = 0; n < 2; ++n) {
+        const uint32_t fill = selected == n ? selectedBg : uint32_t{0x1b2b26};
+        d.fillRoundRect(10 + n * 154, 44, 146, 24, 5, fill);
+        d.setTextColor(selected == n ? text : muted, fill);
+        d.drawString(n == 0 ? "キッチン" : "リビング", 83 + n * 154, 56);
+    }
     const auto& state = states[selected];
-    d.setFont(&fonts::efontJA_16);
-    d.setTextDatum(middle_left);
-    label(state.power == Power::On ? "点灯中" : powerName(state.power), 10, 49);
-    d.setTextDatum(middle_center);
-    d.setFont(&fonts::efontJA_12);
+    d.fillRoundRect(8, 76, 304, 34, 7, powerColors.panel);
     for (int i = 0; i < 3; ++i) {
         Power power = i == 0 ? Power::On : i == 1 ? Power::Night : Power::Off;
-        control(8 + i * 103, 64, 98, 28,
-                i == 0 ? "点灯" : i == 1 ? "常夜灯" : "消灯", state.power == power);
+        control(12 + i * 100, 80, 96, 26,
+                i == 0 ? "点灯" : i == 1 ? "常夜灯" : "消灯", state.power == power, false, "", &powerColors);
     }
-    auto axisLabel = [&](const char* name, const String& value, int y) {
-        d.setTextDatum(middle_left); label(name, 10, y, muted);
-        d.setTextDatum(middle_right); label(value, 310, y);
-        d.setTextDatum(middle_center);
-    };
     if (selected == 0) {
-        String value = state.brightness < 0 ? "未確認" : String((state.brightness + 1) * 20) + "%";
-        axisLabel("明るさ", value, 110);
+        d.fillRoundRect(8, 116, 304, 44, 7, brightnessColors.panel);
         for (int i = 0; i < 5; ++i) {
-            control(8 + i * 61, 122, 57, 25, String((i + 1) * 20) + "%", state.brightness == i);
+            control(12 + i * 60, 120, 56, 36, String((i + 1) * 20) + "%", state.brightness == i,
+                    false, "", &brightnessColors);
         }
-        control(10, 185, 116, 25, "キャリブレーション", false, true);
-        label("点灯中に押す", 165, 197, muted);
-        control(240, 185, 70, 25, "電源ボタン", false, true);
+        d.fillRoundRect(8, 174, 304, 42, 7, utilityColors.panel);
+        control(12, 178, 184, 34, "キャリブレーション", false, true, "点灯中に押す", &utilityColors);
+        control(200, 178, 108, 34, "電源ボタン", false, true, "", &utilityColors);
     } else {
-        axisLabel("明るさ", state.brightness < 0 ? (normal[1] ? "普段設定" : "未確認") : String(state.brightness * 20) + "%", 104);
-        axisLabel("色", state.color < 0 ? (normal[1] ? "普段設定" : "未確認") : "", 151);
         constexpr uint32_t colors[] = {0xffbd6b, 0xffd08c, 0xffdfb0, 0xffeacb, 0xfff2e3, 0xf4f8ff};
+        d.fillRoundRect(8, 116, 304, 32, 7, brightnessColors.panel);
+        d.fillRoundRect(8, 154, 304, 32, 7, uint32_t{0x242b32});
         for (int i = 0; i < 6; ++i) {
-            int x = 8 + i * 51;
-            control(x, 114, 47, 25, String(i * 20) + "%", state.brightness == i);
-            d.fillRoundRect(x, 161, 47, 25, 4, colors[i]);
+            int x = 12 + i * 50;
+            control(x, 120, 46, 24, String(i * 20) + "%", state.brightness == i, false, "", &brightnessColors);
+            d.fillRoundRect(x, 158, 46, 24, 4, colors[i]);
             if (state.color == i) {
-                d.drawRoundRect(x, 161, 47, 25, 4, accent);
-                d.drawRoundRect(x + 1, 162, 45, 23, 3, bg);
-                d.drawLine(x + 18, 173, x + 22, 177, bg);
-                d.drawLine(x + 22, 177, x + 29, 169, bg);
+                d.drawRoundRect(x, 158, 46, 24, 4, accent);
+                d.drawRoundRect(x + 1, 159, 44, 22, 3, bg);
+                d.drawLine(x + 15, 169, x + 19, 173, bg);
+                d.drawLine(x + 19, 173, x + 26, 165, bg);
             }
         }
-        control(8, 193, 149, 25, "全灯");
-        control(162, 193, 150, 25, "普段");
+        d.fillRoundRect(8, 192, 304, 26, 7, utilityColors.panel);
+        control(12, 194, 144, 22, "全灯", false, false, "", &utilityColors);
+        control(164, 194, 144, 22, "普段", false, false, "", &utilityColors);
     }
     String notice = busy[selected] ? String("送信中 ") + progress[selected].load() + " / " + total[selected] : notices[selected];
     drawFooter(notice);
@@ -407,6 +492,7 @@ void redrawLighting() {
 
 void beginLighting() {
     beginLightStorage();
+    beginEnvironmentHistory();
     for (int n = 0; n < 2; ++n) {
         const bool restored = loadLightState(static_cast<Id>(n), states[n], normal[n]);
         if (restored)
@@ -417,11 +503,14 @@ void beginLighting() {
     }
     canvas.setColorDepth(16);
     canvasReady = canvas.createSprite(M5.Display.width(), M5.Display.height()) != nullptr;
+    environmentResults = xQueueCreate(1, sizeof(EnvironmentSample));
     requests = xQueueCreate(2, sizeof(Job));
     results = xQueueCreate(2, sizeof(Result));
+    if (!environmentResults) environmentCode = -105;
     if (!requests || !results ||
         xTaskCreate(senderTask, "remo", 12288, nullptr, 1, nullptr) != pdPASS) {
         requests = nullptr;
+        environmentCode = -105;
         notices[0] = notices[1] = "送信機能を開始できません";
     }
     redrawLighting();
@@ -430,6 +519,16 @@ void beginLighting() {
 }
 
 void updateLighting() {
+    EnvironmentSample sample;
+    if (environmentResults && xQueueReceive(environmentResults, &sample, 0) == pdTRUE) {
+        environmentCode = sample.code;
+        if (sample.code == 200) {
+            environment = sample;
+            acceptEnvironmentSample(sample, time(nullptr));
+        }
+        if (page == Page::Environment) redrawLighting();
+    }
+    if (updateEnvironmentHistory(time(nullptr)) && page == Page::Environment) redrawLighting();
     static String lastClock;
     String clock=footerClock();
     if (clock!=lastClock) { lastClock=clock; redrawLighting(); }
@@ -470,7 +569,7 @@ void updateLighting() {
         redrawLighting();
     }
     static int lastProgress[2] = {-1, -1};
-    if (selected < 2 && busy[selected] && progress[selected].load() != lastProgress[selected]) {
+    if (page == Page::Remote && busy[selected] && progress[selected].load() != lastProgress[selected]) {
         lastProgress[selected] = progress[selected].load();
         redrawLighting();
     }
@@ -478,22 +577,34 @@ void updateLighting() {
     if (!touch.wasPressed()) return;
     // CoreS3 SE's touch panel extends 40 pixels below the visible LCD.
     if (touch.y >= 240 && touch.y < 280 && touch.x >= 0 && touch.x < 320) {
-        selected = touch.x * 3 / 320;
+        page = static_cast<Page>(touch.x * 3 / 320);
         redrawLighting();
         return;
     }
-    if (touch.y >= 8 && touch.y < 34 && touch.x >= 8 && touch.x < 232) {
-        selected = (touch.x - 8) / 76;
+    if (touch.y >= 8 && touch.y < 34 && touch.x >= 8 && touch.x < 280) {
+        page = static_cast<Page>((touch.x - 8) / 92);
         redrawLighting();
         return;
     }
-    if (selected == 2) {
+    if (page == Page::Automation) {
         if (touch.y >= 43 && touch.y < 72) changeAutomation(0,0);
         for (int i=0; i<3; ++i) {
-            if (touch.y < 81+i*35 || touch.y >= 108+i*35) continue;
-            if (touch.x >= 68 && touch.x < 113) changeAutomation(i+1,-1);
-            if (touch.x >= 250 && touch.x < 310) changeAutomation(i+1,1);
+            if (touch.y < 82+i*44 || touch.y >= 114+i*44) continue;
+            if (touch.x >= 80 && touch.x < 128) changeAutomation(i+1,-1);
+            if (touch.x >= 264 && touch.x < 312) changeAutomation(i+1,1);
         }
+        redrawLighting();
+        return;
+    }
+    if (page == Page::Environment) {
+        if (touch.y >= 42 && touch.y < 108 && touch.x >= 8 && touch.x < 312) {
+            environmentBrightness = touch.x >= 163;
+            redrawLighting();
+        }
+        return;
+    }
+    if (touch.y >= 42 && touch.y < 70 && touch.x >= 8 && touch.x < 312) {
+        selected = touch.x < 160 ? 0 : 1;
         redrawLighting();
         return;
     }
@@ -502,25 +613,25 @@ void updateLighting() {
         return touch.x >= x && touch.x < x + w && touch.y >= y && touch.y < y + h;
     };
     for (int i = 0; i < 3; ++i) {
-        if (inside(8 + i * 103, 64, 98, 28)) {
+        if (inside(12 + i * 100, 76, 96, 34)) {
             requestLighting(i == 0 ? Power::On : i == 1 ? Power::Night : Power::Off, -1, selectedId());
         }
     }
     if (selected == 1) {
         for (int i = 0; i < 6; ++i) {
-            if (inside(8 + i * 51, 114, 47, 25)) requestLivingPercent(Axis::Brightness, i);
-            if (inside(8 + i * 51, 161, 47, 25)) requestLivingPercent(Axis::Color, i);
+            if (inside(12 + i * 50, 116, 46, 32)) requestLivingPercent(Axis::Brightness, i);
+            if (inside(12 + i * 50, 154, 46, 32)) requestLivingPercent(Axis::Color, i);
         }
-        if (inside(8, 193, 149, 25)) start(Signal::Full);
-        if (inside(162, 193, 150, 25)) start(Signal::Normal);
+        if (inside(12, 192, 144, 26)) start(Signal::Full);
+        if (inside(164, 192, 144, 26)) start(Signal::Normal);
     } else {
         for (int i = 0; i < 5; ++i) {
-            if (!inside(8 + i * 61, 122, 57, 25)) continue;
+            if (!inside(12 + i * 60, 116, 56, 44)) continue;
             if (states[0].power != Power::On) notices[0] = "点灯状態に合わせてから調光してください";
             else requestLighting(Power::On, i, Id::Kitchen);
         }
-        if (inside(10, 185, 116, 25)) handleButton(0, 2);
-        if (inside(240, 185, 70, 25)) handleButton(2, 1);
+        if (inside(12, 174, 184, 42)) handleButton(0, 2);
+        if (inside(200, 174, 108, 42)) handleButton(2, 1);
     }
     redrawLighting();
 }
