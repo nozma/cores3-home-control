@@ -1,4 +1,5 @@
 #include "lighting.h"
+#include "auto_control.h"
 #include "error_log.h"
 #include "light_storage.h"
 #include "light_model.h"
@@ -28,7 +29,7 @@
 
 namespace {
 using namespace light;
-struct Job : Plan { Id id = Id::Kitchen; };
+struct Job : Plan { Id id = Id::Kitchen; bool automatic = false; };
 struct Result { Job job; int completed; int code; LightingError error; };
 QueueHandle_t requests = nullptr;
 QueueHandle_t results = nullptr;
@@ -239,6 +240,7 @@ bool enqueue(const Job& job) {
 void start(Signal signal, int count = 1, int syncLevel = -1) {
     Job job;
     job.id = selectedId();
+    automationManual(job.id);
     job.count = count;
     job.syncLevel = syncLevel;
     for (int i = 0; i < count; ++i) job.signals[i] = signal;
@@ -281,13 +283,13 @@ void redrawLighting() {
                        bool active = false, bool secondary = false) {
         uint32_t fill = secondary ? 0x1b2b26 : active ? accent : surface;
         d.fillRoundRect(x, y, w, h, 5, fill);
-        d.setTextColor(busy[selected] ? muted : active ? bg : secondary ? 0xa7baac : text, fill);
+        d.setTextColor((selected < 2 && busy[selected]) ? muted : active ? bg : secondary ? 0xa7baac : text, fill);
         d.drawString(value, x + w / 2, y + h / 2);
     };
-    for (int n = 0; n < 2; ++n) {
+    for (int n = 0; n < 3; ++n) {
         d.fillRoundRect(8 + n * 76, 8, 72, 26, 6, selected == n ? selectedBg : bg);
         d.setTextColor(selected == n ? text : muted, selected == n ? selectedBg : bg);
-        d.drawString(n == 0 ? "キッチン" : "リビング", 44 + n * 76, 21);
+        d.drawString(n == 0 ? "キッチン" : n == 1 ? "リビング" : "自動制御", 44 + n * 76, 21);
     }
     bool connected = WiFi.status() == WL_CONNECTED;
     const uint32_t wifiColor = connected ? uint32_t{0xb9d58d} : uint32_t{0x819087};
@@ -300,6 +302,30 @@ void redrawLighting() {
         d.drawLine(287, 14, 307, 31, bg);
         d.drawLine(287, 12, 307, 29, wifiColor);
         d.drawLine(287, 13, 307, 30, wifiColor);
+    }
+    if (selected == 2) {
+        const auto& cfg = automationSettings();
+        control(8, 43, 304, 29, cfg.enabled ? "自動制御：有効" : "自動制御：無効", cfg.enabled);
+        int values[] = {cfg.wake, cfg.work, cfg.bed};
+        const char* names[] = {"起床", "終業", "就寝"};
+        for (int i=0; i<3; ++i) {
+            int y=81+i*35;
+            label(names[i], 33, y+13);
+            control(68,y,45,27,"−");
+            char value[8]; snprintf(value,sizeof(value),"%02d:%02d",values[i]/60,values[i]%60);
+            label(value,169,y+13);
+            control(250,y,60,27,"＋");
+        }
+        label(automationNext(),160,199,accent);
+        String message=automationStatus();
+        while (d.textWidth(message)>300 && message.length()) {
+            int pos=message.length()-1;
+            while(pos>0 && (static_cast<unsigned char>(message[pos])&0xc0)==0x80) --pos;
+            message.remove(pos);
+        }
+        label(message,160,228,muted);
+        if (canvasReady) canvas.pushSprite(0,0);
+        return;
     }
     const auto& state = states[selected];
     d.setFont(&fonts::efontJA_16);
@@ -416,11 +442,12 @@ void updateLighting() {
                       n, saved, static_cast<int>(estimated.power), estimated.brightness,
                       estimated.color, normal[n]);
         Serial.printf("REMO_RESULT: device=%d completed=%d/%d code=%d\n", n, result.completed, result.job.count, result.code);
+        if (result.job.automatic) automationResult(result.job.id, result.completed == result.job.count && saved);
         busy[n] = false;
         redrawLighting();
     }
     static int lastProgress[2] = {-1, -1};
-    if (busy[selected] && progress[selected].load() != lastProgress[selected]) {
+    if (selected < 2 && busy[selected] && progress[selected].load() != lastProgress[selected]) {
         lastProgress[selected] = progress[selected].load();
         redrawLighting();
     }
@@ -432,8 +459,18 @@ void updateLighting() {
         redrawLighting();
         return;
     }
-    if (touch.y >= 8 && touch.y < 34 && touch.x >= 8 && touch.x < 156) {
-        selected = touch.x < 84 ? 0 : 1;
+    if (touch.y >= 8 && touch.y < 34 && touch.x >= 8 && touch.x < 232) {
+        selected = (touch.x - 8) / 76;
+        redrawLighting();
+        return;
+    }
+    if (selected == 2) {
+        if (touch.y >= 43 && touch.y < 72) changeAutomation(0,0);
+        for (int i=0; i<3; ++i) {
+            if (touch.y < 81+i*35 || touch.y >= 108+i*35) continue;
+            if (touch.x >= 68 && touch.x < 113) changeAutomation(i+1,-1);
+            if (touch.x >= 250 && touch.x < 310) changeAutomation(i+1,1);
+        }
         redrawLighting();
         return;
     }
@@ -466,6 +503,7 @@ void updateLighting() {
 }
 
 bool requestLivingPercent(Axis axis, int step) {
+    automationManual(Id::Living);
     Plan plan = planLivingAxis(states[1], axis, step);
     bool accepted = false;
     if (busy[1]) notices[1] = "送信中です。完了後に再操作してください";
@@ -485,6 +523,7 @@ light::State getLightingState(Id id) { return states[index(id)]; }
 bool isLightingBusy(Id id) { return busy[index(id)]; }
 
 bool requestLighting(Power power, int brightness, Id id) {
+    automationManual(id);
     int n = index(id);
     Plan plan = n == 0 ? light::planTarget(states[n], power, brightness) :
                         light::planLiving(states[n], power, brightness);
@@ -498,6 +537,21 @@ bool requestLighting(Power power, int brightness, Id id) {
         job.id = id;
         accepted = enqueue(job);
     }
+    redrawLighting();
+    return accepted;
+}
+
+// Build one atomic job so another producer cannot interleave a preset and its adjustments.
+bool requestAutomaticLighting(Id id, Power power, int brightness, int color,
+                              bool full, bool restore, int savedBrightness, int savedColor) {
+    int n=index(id);
+    if (busy[n]) return false;
+    Job job; job.id=id; job.automatic=true;
+    static_cast<Plan&>(job)=automation::plan(id,states[n],power,brightness,color,
+                                           full,restore,savedBrightness,savedColor);
+    if (!job.valid) { notices[n]="自動制御：キャリブレーションが必要です"; redrawLighting(); return false; }
+    if (!job.count) return true;
+    bool accepted=enqueue(job);
     redrawLighting();
     return accepted;
 }

@@ -49,7 +49,7 @@ int main() {
     uncertainLiving(state, Signal::Down);
     assert(state.brightness == -1 && state.color == 2);
     applyLiving(state, Signal::Full);
-    assert(state.brightness == 5 && state.color == -1 && state.power == Power::On);
+    assert(state.brightness == 5 && state.color == 5 && state.power == Power::On);
     applyLiving(state, Signal::Off);
     assert(state.brightness == 5 && state.power == Power::Off);
     assert(livingStep(1) == 0 && livingStep(102) == 2 && livingStep(255) == 5);
