@@ -210,21 +210,21 @@ void button(int x, int y, int width, const char* label, uint32_t color = TFT_DAR
 bool enqueue(const Job& job) {
     int n = index(job.id);
     auto& notice = notices[n];
-    if (busy[n]) { notice = "送信中です。完了後に再操作してください"; return false; }
+    if (busy[n]) { notice = "送信中：完了後に再操作してください"; return false; }
     if (!requests || !results) { notice = "送信機能を開始できません"; return false; }
     bool needsCloud = false;
     for (int i = 0; i < job.count; ++i) {
         bool local = job.id == Id::Living && isAdjustment(job.signals[i]);
         if (local && (!REMO_LOCAL_HOST[0] || !localPayload(job.signals[i])[0])) {
-            notice = "ローカルIR信号の設定を確認してください"; return false;
+            notice = "ローカルIR設定を確認してください"; return false;
         }
         if (!local) needsCloud = true;
     }
     if (needsCloud && !configured(job.id)) { notice = "Remoの設定を確認してください"; return false; }
     if (WiFi.status() != WL_CONNECTED) { notice = "Wi-Fi未接続です"; return false; }
-    if (needsCloud && time(nullptr) < 1704067200) { notice = "時刻同期中です。少し待って再操作"; return false; }
+    if (needsCloud && time(nullptr) < 1704067200) { notice = "時刻同期待ち：しばらくして再操作"; return false; }
     if (!prepareLightState(job.id, states[n], normal[n], job)) {
-        notice = "状態を保存できません。送信を中止しました"; return false;
+        notice = "状態保存失敗：送信を中止しました"; return false;
     }
     if (xQueueSend(requests, &job, 0) != pdTRUE) {
         saveLightState(job.id, states[n], normal[n]);
@@ -266,6 +266,40 @@ void handleButton(int column, int row) {
 
 
 }  // namespace
+
+namespace {
+String footerClock() {
+    time_t now=time(nullptr);
+    if (now < 1704067200) return "--:--";
+    now += 9 * 3600;
+    struct tm local;
+    gmtime_r(&now,&local);
+    char text[6]; strftime(text,sizeof(text),"%H:%M",&local);
+    return text;
+}
+void drawFooter(String message) {
+    auto& d=drawingSurface();
+    constexpr uint32_t bg=0x111e1c, accent=0xc8dda7, muted=0x95aba0;
+    d.setFont(&fonts::efontJA_12);
+    d.setTextSize(1);
+    String clock=footerClock();
+    // Reserve the clock's measured width and an 8px gap; never overlap it.
+    int available=300-d.textWidth(clock)-8;
+    bool clipped=d.textWidth(message)>available;
+    String suffix=clipped ? "…" : "";
+    while (message.length() && d.textWidth(message+suffix)>available) {
+        int pos=message.length()-1;
+        while(pos>0 && (static_cast<unsigned char>(message[pos])&0xc0)==0x80) --pos;
+        message.remove(pos);
+    }
+    d.drawFastHLine(10,219,300,uint32_t{0x25302c});
+    d.setTextDatum(middle_left); d.setTextColor(accent,bg);
+    d.drawString(message+suffix,10,230);
+    d.setTextDatum(middle_right); d.setTextColor(muted,bg);
+    d.drawString(clock,310,230);
+    d.setTextDatum(middle_center);
+}
+}
 
 void redrawLighting() {
     auto& d = drawingSurface();
@@ -316,16 +350,7 @@ void redrawLighting() {
             label(value,169,y+13);
             control(250,y,60,27,"＋");
         }
-        String message=automationStatus();
-        while (d.textWidth(message)>298 && message.length()) {
-            int pos=message.length()-1;
-            while(pos>0 && (static_cast<unsigned char>(message[pos])&0xc0)==0x80) --pos;
-            message.remove(pos);
-        }
-        d.drawFastHLine(10, 219, 300, uint32_t{0x25302c});
-        d.setTextDatum(middle_left);
-        label(message,10,230,accent);
-        d.setTextDatum(middle_center);
+        drawFooter(automationStatus());
         if (canvasReady) canvas.pushSprite(0,0);
         return;
     }
@@ -372,18 +397,8 @@ void redrawLighting() {
         control(8, 193, 149, 25, "全灯");
         control(162, 193, 150, 25, "普段");
     }
-    // Explicit RGB888: an int literal selects the RGB565 color overload.
-    d.drawFastHLine(10, 219, 300, uint32_t{0x25302c});
-    d.setTextDatum(middle_left);
     String notice = busy[selected] ? String("送信中 ") + progress[selected].load() + " / " + total[selected] : notices[selected];
-    // Keep long errors inside the footer without changing their stored detail.
-    while (d.textWidth(notice) > 298 && notice.length() > 0) {
-        int pos = notice.length() - 1;
-        while (pos > 0 && (static_cast<unsigned char>(notice[pos]) & 0xc0) == 0x80) --pos;
-        notice.remove(pos);
-    }
-    label(notice, 10, 230, accent);
-    d.setTextDatum(middle_center);
+    drawFooter(notice);
     if (canvasReady) canvas.pushSprite(0, 0);
 }
 
@@ -412,6 +427,9 @@ void beginLighting() {
 }
 
 void updateLighting() {
+    static String lastClock;
+    String clock=footerClock();
+    if (clock!=lastClock) { lastClock=clock; redrawLighting(); }
     Result result;
     if (results && xQueueReceive(results, &result, 0) == pdTRUE) {
         int n = index(result.job.id);
@@ -433,9 +451,9 @@ void updateLighting() {
                 uncertainLiving(estimated, failed);
                 normal[1] = false;
             }
-            notices[n] = result.code == HTTPC_ERROR_READ_TIMEOUT ? "応答待ち時間切れ：実際の状態を確認" :
+            notices[n] = result.code == HTTPC_ERROR_READ_TIMEOUT ? "応答時間切れ：実際の照明を確認" :
                 result.code == 429 ? "送信制限：5分待ってから再操作" :
-                "送信失敗 " + String(result.code) + "：実際の状態を確認してください";
+                "送信失敗 " + String(result.code) + "：実際の照明を確認";
         }
         const bool saved = saveLightState(result.job.id, estimated, normal[n]);
         if (!saved)
@@ -508,7 +526,7 @@ bool requestLivingPercent(Axis axis, int step) {
     automationManual(Id::Living);
     Plan plan = planLivingAxis(states[1], axis, step);
     bool accepted = false;
-    if (busy[1]) notices[1] = "送信中です。完了後に再操作してください";
+    if (busy[1]) notices[1] = "送信中：完了後に再操作してください";
     else if (!plan.valid) notices[1] = "指定は0〜100%の20%刻みです";
     else if (plan.count == 0) { notices[1] = "推定では既にその値です"; accepted = true; }
     else {
@@ -530,7 +548,7 @@ bool requestLighting(Power power, int brightness, Id id) {
     Plan plan = n == 0 ? light::planTarget(states[n], power, brightness) :
                         light::planLiving(states[n], power, brightness);
     bool accepted = false;
-    if (busy[n]) notices[n] = "送信中です。完了後に再操作してください";
+    if (busy[n]) notices[n] = "送信中：完了後に再操作してください";
     else if (!plan.valid) notices[n] = n == 0 ? "点灯中にキャリブレーションを押す" : "明るさの段階数を設定してください";
     else if (plan.count == 0) { notices[n] = "推定では既にその状態です"; accepted = true; }
     else {
@@ -551,7 +569,7 @@ bool requestAutomaticLighting(Id id, Power power, int brightness, int color,
     Job job; job.id=id; job.automatic=true;
     static_cast<Plan&>(job)=automation::plan(id,states[n],power,brightness,color,
                                            full,restore,savedBrightness,savedColor);
-    if (!job.valid) { notices[n]="自動制御：キャリブレーションが必要です"; redrawLighting(); return false; }
+    if (!job.valid) { notices[n]="自動制御：点灯中にキャリブレーション"; redrawLighting(); return false; }
     if (!job.count) return true;
     bool accepted=enqueue(job);
     redrawLighting();
