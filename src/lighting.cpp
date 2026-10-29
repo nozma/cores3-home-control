@@ -70,12 +70,16 @@ int sendLocal(Signal signal) {
     WiFiClient client;
     HTTPClient http;
     http.setConnectTimeout(800);
-    http.setTimeout(1200);
+    // Remo may respond only after emitting the burst; allow for LAN latency too.
+    http.setTimeout(localDuration(signal) + 5000);
     http.setReuse(false);
     if (!http.begin(client, String("http://") + REMO_LOCAL_HOST + "/messages")) return -102;
     http.addHeader("X-Requested-With", "XMLHttpRequest");
     http.addHeader("Content-Type", "application/json");
+    const uint32_t started = millis();
     int code = http.POST(String(localPayload(signal)));
+    Serial.printf("REMO_LOCAL_RESULT: signal=%d elapsed_ms=%lu code=%d\n",
+                  static_cast<int>(signal), static_cast<unsigned long>(millis() - started), code);
     http.end();
     // Even an uncertain HTTP result may have started IR transmission.
     localUntil = millis() + localDuration(signal) + 80;
@@ -135,7 +139,10 @@ int sendSignal(Id id, Signal signal) {
     sentAt[sentCount % 30] = millis();
     ++sentCount;
     if (payload.length()) http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    const uint32_t started = millis();
     const int code = http.POST(payload);
+    Serial.printf("REMO_CLOUD_RESULT: device=%d signal=%d elapsed_ms=%lu code=%d\n",
+                  index(id), static_cast<int>(signal), static_cast<unsigned long>(millis() - started), code);
     http.end();
     lastSent = millis();
     hasSent = true;
@@ -361,7 +368,8 @@ void updateLighting() {
                 uncertainLiving(estimated, failed);
                 normal[1] = false;
             }
-            notices[n] = result.code == 429 ? "送信制限：5分待ってから再操作" :
+            notices[n] = result.code == HTTPC_ERROR_READ_TIMEOUT ? "応答待ち時間切れ：実際の状態を確認" :
+                result.code == 429 ? "送信制限：5分待ってから再操作" :
                 "送信失敗 " + String(result.code) + "：実際の状態を確認してください";
         }
         Serial.printf("REMO_RESULT: device=%d completed=%d/%d code=%d\n", n, result.completed, result.job.count, result.code);
