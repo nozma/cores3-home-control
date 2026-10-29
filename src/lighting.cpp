@@ -3,6 +3,7 @@
 #include "error_log.h"
 #include "light_storage.h"
 #include "light_model.h"
+#include "environment_model.h"
 #include "remo_ca.h"
 #if __has_include("remo_local.h")
 #include "remo_local.h"
@@ -33,6 +34,14 @@ struct Job : Plan { Id id = Id::Kitchen; bool automatic = false; };
 struct Result { Job job; int completed; int code; LightingError error; };
 QueueHandle_t requests = nullptr;
 QueueHandle_t results = nullptr;
+QueueHandle_t environmentResults = nullptr;
+EnvironmentSample environment;
+int environmentCode = 0;
+std::atomic<bool> environmentVisible{false};
+uint32_t environmentFetchedAt = 0;
+bool environmentAttempted = false;
+constexpr uint32_t kEnvironmentInterval = 60000;
+
 State states[2];
 bool busy[2]{};
 bool normal[2]{};
@@ -156,12 +165,66 @@ int sendSignal(Id id, Signal signal) {
     return code;
 }
 
+// Runs only on the common worker; the API budget is shared with lighting.
+void fetchEnvironment() {
+    EnvironmentSample sample;
+    const uint32_t now = millis();
+    if ((rateLimited && now - rateLimitedAt < 300000) ||
+        (sentCount >= 30 && now - sentAt[sentCount % 30] < 300000)) {
+        sample.code = 429;
+    } else {
+        WiFiClientSecure client;
+        client.setCACert(kRemoRootCa);
+        client.setHandshakeTimeout(8);
+        HTTPClient http;
+        http.setConnectTimeout(8000);
+        http.setTimeout(8000);
+        if (!http.begin(client, "https://api.nature.global/1/devices")) sample.code = -102;
+        else {
+            http.addHeader("Authorization", String("Bearer ") + REMO_ACCESS_TOKEN);
+            http.addHeader("accept", "application/json");
+            sentAt[sentCount % 30] = millis();
+            ++sentCount;
+            sample.code = http.GET();
+            if (sample.code == 200) {
+                // Filter out identifiers and unrelated device metadata.
+                StaticJsonDocument<256> filter;
+                filter[0]["name"] = true;
+                filter[0]["newest_events"] = true;
+                DynamicJsonDocument doc(8192);
+                if (deserializeJson(doc, http.getString(), DeserializationOption::Filter(filter)) ||
+                    !doc.is<JsonArray>()) sample.code = -103;
+                else {
+                    sample = parseEnvironment(doc.as<JsonArray>());
+                }
+            }
+            http.end();
+            lastSent = millis();
+            hasSent = true;
+            if (sample.code == 429) {
+                rateLimited = true;
+                rateLimitedAt = millis();
+            }
+        }
+    }
+    xQueueOverwrite(environmentResults, &sample);
+}
+
 void senderTask(void*) {
     Job job;
     uint32_t previousEnd = 0;
     bool attempted = false;
     while (true) {
-        if (xQueueReceive(requests, &job, portMAX_DELAY) != pdTRUE) continue;
+        if (xQueueReceive(requests, &job, pdMS_TO_TICKS(100)) != pdTRUE) {
+            if (environmentResults && environmentVisible.load() && REMO_ACCESS_TOKEN[0] &&
+                WiFi.status() == WL_CONNECTED && time(nullptr) >= 1704067200 &&
+                (!environmentAttempted || millis() - environmentFetchedAt >= kEnvironmentInterval)) {
+                environmentAttempted = true;
+                fetchEnvironment();
+                environmentFetchedAt = millis();
+            }
+            continue;
+        }
         Result result{job, 0, 200, {}};
         for (int i = 0; i < job.count; ++i) {
             // All send paths share this worker so emitted IR never overlaps.
@@ -321,10 +384,10 @@ void redrawLighting() {
         d.setTextColor((selected < 2 && busy[selected]) ? muted : active ? bg : secondary ? 0xa7baac : text, fill);
         d.drawString(value, x + w / 2, y + h / 2);
     };
-    for (int n = 0; n < 3; ++n) {
-        d.fillRoundRect(8 + n * 76, 8, 72, 26, 6, selected == n ? selectedBg : bg);
+    for (int n = 0; n < 4; ++n) {
+        d.fillRoundRect(8 + n * 68, 8, 66, 26, 6, selected == n ? selectedBg : bg);
         d.setTextColor(selected == n ? text : muted, selected == n ? selectedBg : bg);
-        d.drawString(n == 0 ? "キッチン" : n == 1 ? "リビング" : "自動制御", 44 + n * 76, 21);
+        d.drawString(n == 0 ? "キッチン" : n == 1 ? "リビング" : n == 2 ? "自動制御" : "環境", 41 + n * 68, 21);
     }
     bool connected = WiFi.status() == WL_CONNECTED;
     const uint32_t wifiColor = connected ? uint32_t{0xb9d58d} : uint32_t{0x819087};
@@ -337,6 +400,46 @@ void redrawLighting() {
         d.drawLine(287, 14, 307, 31, bg);
         d.drawLine(287, 12, 307, 29, wifiColor);
         d.drawLine(287, 13, 307, 30, wifiColor);
+    }
+    if (selected == 3) {
+        const char* names[] = {"温度", "湿度", "照度", "最終検知"};
+        const char* units[] = {" ℃", " %", " (API値)", ""};
+        for (int i = 0; i < 4; ++i) {
+            int y = 55 + i * 38;
+            d.setTextDatum(middle_left);
+            label(names[i], 12, y, muted);
+            String value = "未取得";
+            if (environment.available[i]) {
+                value = i == 3 ? (environment.values[i] > 0 ? "動き検知" : "検知なし") : String(environment.values[i], i == 0 ? 1 : 0) + units[i];
+            }
+            d.setFont(&fonts::efontJA_16);
+            label(value, 65, y);
+            d.setFont(&fonts::efontJA_12);
+            String stamp = "--";
+            struct tm utc{};
+            if (strptime(environment.timestamps[i], "%Y-%m-%dT%H:%M:%SZ", &utc)) {
+                time_t t = mktime(&utc) + 9 * 3600;
+                struct tm japan;
+                gmtime_r(&t, &japan);
+                char formatted[20];
+                strftime(formatted, sizeof(formatted), "%m/%d %H:%M", &japan);
+                stamp = formatted;
+            }
+            d.setTextDatum(middle_right);
+            label(stamp, 308, y, muted);
+        }
+        d.setTextDatum(middle_left);
+        label("remo / 右欄：イベント更新日時", 12, 201, muted);
+        String status = !REMO_ACCESS_TOKEN[0] ? "Remo設定が必要です" :
+            !connected ? "Wi-Fi未接続：前回値を表示" :
+            time(nullptr) < 1704067200 ? "時刻同期待ち" :
+            environmentCode == 200 ? "最新取得値 / 1分ごとに確認" :
+            environmentCode == 429 ? "API制限：取得を保留中" :
+            environmentCode == -104 ? "登録名remoを一意に特定できません" :
+            environmentCode ? "取得失敗：前回値を表示" : "環境情報を取得しています";
+        drawFooter(status);
+        if (canvasReady) canvas.pushSprite(0, 0);
+        return;
     }
     if (selected == 2) {
         const auto& cfg = automationSettings();
@@ -417,11 +520,14 @@ void beginLighting() {
     }
     canvas.setColorDepth(16);
     canvasReady = canvas.createSprite(M5.Display.width(), M5.Display.height()) != nullptr;
+    environmentResults = xQueueCreate(1, sizeof(EnvironmentSample));
     requests = xQueueCreate(2, sizeof(Job));
     results = xQueueCreate(2, sizeof(Result));
+    if (!environmentResults) environmentCode = -105;
     if (!requests || !results ||
         xTaskCreate(senderTask, "remo", 12288, nullptr, 1, nullptr) != pdPASS) {
         requests = nullptr;
+        environmentCode = -105;
         notices[0] = notices[1] = "送信機能を開始できません";
     }
     redrawLighting();
@@ -430,6 +536,12 @@ void beginLighting() {
 }
 
 void updateLighting() {
+    EnvironmentSample sample;
+    if (environmentResults && xQueueReceive(environmentResults, &sample, 0) == pdTRUE) {
+        environmentCode = sample.code;
+        if (sample.code == 200) environment = sample;
+        if (selected == 3) redrawLighting();
+    }
     static String lastClock;
     String clock=footerClock();
     if (clock!=lastClock) { lastClock=clock; redrawLighting(); }
@@ -478,12 +590,14 @@ void updateLighting() {
     if (!touch.wasPressed()) return;
     // CoreS3 SE's touch panel extends 40 pixels below the visible LCD.
     if (touch.y >= 240 && touch.y < 280 && touch.x >= 0 && touch.x < 320) {
-        selected = touch.x * 3 / 320;
+        selected = touch.x * 4 / 320;
+        environmentVisible.store(selected == 3);
         redrawLighting();
         return;
     }
-    if (touch.y >= 8 && touch.y < 34 && touch.x >= 8 && touch.x < 232) {
-        selected = (touch.x - 8) / 76;
+    if (touch.y >= 8 && touch.y < 34 && touch.x >= 8 && touch.x < 280) {
+        selected = (touch.x - 8) / 68;
+        environmentVisible.store(selected == 3);
         redrawLighting();
         return;
     }
@@ -497,6 +611,7 @@ void updateLighting() {
         redrawLighting();
         return;
     }
+    if (selected == 3) return;
     if (busy[selected]) return;
     auto inside = [&](int x, int y, int w, int h) {
         return touch.x >= x && touch.x < x + w && touch.y >= y && touch.y < y + h;
