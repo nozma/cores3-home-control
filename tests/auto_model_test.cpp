@@ -55,6 +55,25 @@ int main() {
     auto night=plan(Id::Living,on,Power::Night,-1,-1,false,false,2,0);
     assert(night.count==1 && night.signals[0]==Signal::Night);
     auto unknown=plan(Id::Kitchen,State{},Power::On,1,-1,false,false,2,0); assert(!unknown.valid);
+    for (int bed=1260;bed<=1440;bed+=15) {
+        Settings t; t.bed=bed;
+        for (auto id : {Id::Kitchen,Id::Living}) {
+            int start=id==Id::Kitchen?1:2, last=start, changes=0;
+            for(int e=0;e<120;++e) {
+                int m=bed-120+e, level=bedtimeLevel(t,m,id);
+                assert(level>=0 && level<=last);
+                if(level!=last) { ++changes; assert(event(t,m,1,2,0)); }
+                if(e>=105) assert(level==0);
+                last=level;
+            }
+            assert(changes==start);
+        }
+        assert(bedtimeLevel(t,bed-120,Id::Kitchen)==1);
+        assert(bedtimeLevel(t,bed-68,Id::Living)==2);
+        assert(bedtimeLevel(t,bed-67,Id::Living)==1);
+        assert(event(t,bed-15,1,2,0));
+        assert(!event(t,bed-14,1,2,0));
+    }
     // First use without a saved living snapshot calibrates once, then uses differences.
     auto initial=plan(Id::Living,off,Power::On,2,0,false,false,2,0);
     assert(initial.count==13 && initial.signals[0]==Signal::Normal);
