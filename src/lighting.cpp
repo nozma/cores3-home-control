@@ -284,14 +284,20 @@ void drawFooter(String message) {
     d.setTextSize(1);
     String clock=footerClock();
     // Give long messages the entire footer instead of abbreviating them.
-    bool showClock=d.textWidth(message)+d.textWidth(clock)+8<=300;
+    int messageWidth=d.textWidth(message);
+    d.setFont(&fonts::efontJA_16);
+    int clockWidth=d.textWidth(clock);
+    d.setFont(&fonts::efontJA_12);
+    bool showClock=messageWidth+clockWidth+8<=300;
     d.drawFastHLine(10,219,300,uint32_t{0x25302c});
     d.setTextDatum(middle_left); d.setTextColor(accent,bg);
     d.drawString(message,10,230);
     if (showClock) {
+        d.setFont(&fonts::efontJA_16);
         d.setTextDatum(middle_right); d.setTextColor(muted,bg);
         d.drawString(clock,310,230);
     }
+    d.setFont(&fonts::efontJA_12);
     d.setTextDatum(middle_center);
 }
 }
@@ -342,7 +348,9 @@ void redrawLighting() {
             label(names[i], 33, y+13);
             control(68,y,45,27,"−");
             char value[8]; snprintf(value,sizeof(value),"%02d:%02d",values[i]/60,values[i]%60);
+            d.setFont(&fonts::efontJA_16);
             label(value,169,y+13);
+            d.setFont(&fonts::efontJA_12);
             control(250,y,60,27,"＋");
         }
         drawFooter(automationStatus());
