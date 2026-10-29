@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include "lighting.h"
 #include "alexa_control.h"
+#include "error_log.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -43,6 +44,7 @@ void setup() {
     config.internal_mic = false;
     config.internal_spk = false;
     M5.begin(config);
+    beginErrorLog();
 
     M5.Display.setRotation(1);
     M5.Display.setBrightness(128);
@@ -77,5 +79,6 @@ void loop() {
     }
     updateLighting();
     updateAlexa();
+    updateErrorLogConsole();
     delay(20);
 }
