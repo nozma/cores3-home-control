@@ -48,6 +48,9 @@ bool normal[2]{};
 std::atomic<int> progress[2]{};
 int total[2]{};
 String notices[2] = {"点灯中にキャリブレーションを押す", "照明を選んで操作してください"};
+enum class Page { Remote, Automation, Environment };
+Page page = Page::Remote;
+// Remember the selected room independently of the top-level page.
 int selected = 0;
 M5Canvas canvas(&M5.Display);
 bool canvasReady = false;
@@ -381,13 +384,14 @@ void redrawLighting() {
                        bool active = false, bool secondary = false) {
         uint32_t fill = secondary ? 0x1b2b26 : active ? accent : surface;
         d.fillRoundRect(x, y, w, h, 5, fill);
-        d.setTextColor((selected < 2 && busy[selected]) ? muted : active ? bg : secondary ? 0xa7baac : text, fill);
+        d.setTextColor((page == Page::Remote && busy[selected]) ? muted : active ? bg : secondary ? 0xa7baac : text, fill);
         d.drawString(value, x + w / 2, y + h / 2);
     };
-    for (int n = 0; n < 4; ++n) {
-        d.fillRoundRect(8 + n * 68, 8, 66, 26, 6, selected == n ? selectedBg : bg);
-        d.setTextColor(selected == n ? text : muted, selected == n ? selectedBg : bg);
-        d.drawString(n == 0 ? "キッチン" : n == 1 ? "リビング" : n == 2 ? "自動制御" : "環境", 41 + n * 68, 21);
+    for (int n = 0; n < 3; ++n) {
+        const bool active = static_cast<int>(page) == n;
+        d.fillRoundRect(8 + n * 92, 8, 88, 26, 6, active ? selectedBg : bg);
+        d.setTextColor(active ? text : muted, active ? selectedBg : bg);
+        d.drawString(n == 0 ? "リモコン" : n == 1 ? "自動制御" : "環境", 52 + n * 92, 21);
     }
     bool connected = WiFi.status() == WL_CONNECTED;
     const uint32_t wifiColor = connected ? uint32_t{0xb9d58d} : uint32_t{0x819087};
@@ -401,7 +405,7 @@ void redrawLighting() {
         d.drawLine(287, 12, 307, 29, wifiColor);
         d.drawLine(287, 13, 307, 30, wifiColor);
     }
-    if (selected == 3) {
+    if (page == Page::Environment) {
         const char* names[] = {"温度", "湿度", "照度", "最終検知"};
         const char* units[] = {" ℃", " %", " (API値)", ""};
         for (int i = 0; i < 4; ++i) {
@@ -441,7 +445,7 @@ void redrawLighting() {
         if (canvasReady) canvas.pushSprite(0, 0);
         return;
     }
-    if (selected == 2) {
+    if (page == Page::Automation) {
         const auto& cfg = automationSettings();
         control(8, 43, 304, 29, cfg.enabled ? "自動制御：有効" : "自動制御：無効", cfg.enabled);
         int values[] = {cfg.wake, cfg.work, cfg.bed};
@@ -460,15 +464,20 @@ void redrawLighting() {
         if (canvasReady) canvas.pushSprite(0,0);
         return;
     }
+    // Room navigation stays enabled while either light is sending.
+    for (int n = 0; n < 2; ++n) {
+        const uint32_t fill = selected == n ? selectedBg : surface;
+        d.fillRoundRect(8 + n * 103, 42, 98, 26, 5, fill);
+        d.setTextColor(selected == n ? text : muted, fill);
+        d.drawString(n == 0 ? "キッチン" : "リビング", 57 + n * 103, 55);
+    }
     const auto& state = states[selected];
-    d.setFont(&fonts::efontJA_16);
-    d.setTextDatum(middle_left);
-    label(state.power == Power::On ? "点灯中" : powerName(state.power), 10, 49);
+    d.setTextDatum(middle_right);
+    label(state.power == Power::On ? "点灯中" : powerName(state.power), 310, 55, muted);
     d.setTextDatum(middle_center);
-    d.setFont(&fonts::efontJA_12);
     for (int i = 0; i < 3; ++i) {
         Power power = i == 0 ? Power::On : i == 1 ? Power::Night : Power::Off;
-        control(8 + i * 103, 64, 98, 28,
+        control(8 + i * 103, 74, 98, 26,
                 i == 0 ? "点灯" : i == 1 ? "常夜灯" : "消灯", state.power == power);
     }
     auto axisLabel = [&](const char* name, const String& value, int y) {
@@ -478,30 +487,30 @@ void redrawLighting() {
     };
     if (selected == 0) {
         String value = state.brightness < 0 ? "未確認" : String((state.brightness + 1) * 20) + "%";
-        axisLabel("明るさ", value, 110);
+        axisLabel("明るさ", value, 115);
         for (int i = 0; i < 5; ++i) {
-            control(8 + i * 61, 122, 57, 25, String((i + 1) * 20) + "%", state.brightness == i);
+            control(8 + i * 61, 128, 57, 28, String((i + 1) * 20) + "%", state.brightness == i);
         }
         control(10, 185, 116, 25, "キャリブレーション", false, true);
         label("点灯中に押す", 165, 197, muted);
         control(240, 185, 70, 25, "電源ボタン", false, true);
     } else {
-        axisLabel("明るさ", state.brightness < 0 ? (normal[1] ? "普段設定" : "未確認") : String(state.brightness * 20) + "%", 104);
-        axisLabel("色", state.color < 0 ? (normal[1] ? "普段設定" : "未確認") : "", 151);
+        axisLabel("明るさ", state.brightness < 0 ? (normal[1] ? "普段設定" : "未確認") : String(state.brightness * 20) + "%", 110);
+        axisLabel("色", state.color < 0 ? (normal[1] ? "普段設定" : "未確認") : "", 154);
         constexpr uint32_t colors[] = {0xffbd6b, 0xffd08c, 0xffdfb0, 0xffeacb, 0xfff2e3, 0xf4f8ff};
         for (int i = 0; i < 6; ++i) {
             int x = 8 + i * 51;
-            control(x, 114, 47, 25, String(i * 20) + "%", state.brightness == i);
-            d.fillRoundRect(x, 161, 47, 25, 4, colors[i]);
+            control(x, 121, 47, 25, String(i * 20) + "%", state.brightness == i);
+            d.fillRoundRect(x, 165, 47, 25, 4, colors[i]);
             if (state.color == i) {
-                d.drawRoundRect(x, 161, 47, 25, 4, accent);
-                d.drawRoundRect(x + 1, 162, 45, 23, 3, bg);
-                d.drawLine(x + 18, 173, x + 22, 177, bg);
-                d.drawLine(x + 22, 177, x + 29, 169, bg);
+                d.drawRoundRect(x, 165, 47, 25, 4, accent);
+                d.drawRoundRect(x + 1, 166, 45, 23, 3, bg);
+                d.drawLine(x + 18, 177, x + 22, 181, bg);
+                d.drawLine(x + 22, 181, x + 29, 173, bg);
             }
         }
-        control(8, 193, 149, 25, "全灯");
-        control(162, 193, 150, 25, "普段");
+        control(8, 195, 149, 23, "全灯");
+        control(162, 195, 150, 23, "普段");
     }
     String notice = busy[selected] ? String("送信中 ") + progress[selected].load() + " / " + total[selected] : notices[selected];
     drawFooter(notice);
@@ -540,7 +549,7 @@ void updateLighting() {
     if (environmentResults && xQueueReceive(environmentResults, &sample, 0) == pdTRUE) {
         environmentCode = sample.code;
         if (sample.code == 200) environment = sample;
-        if (selected == 3) redrawLighting();
+        if (page == Page::Environment) redrawLighting();
     }
     static String lastClock;
     String clock=footerClock();
@@ -582,7 +591,7 @@ void updateLighting() {
         redrawLighting();
     }
     static int lastProgress[2] = {-1, -1};
-    if (selected < 2 && busy[selected] && progress[selected].load() != lastProgress[selected]) {
+    if (page == Page::Remote && busy[selected] && progress[selected].load() != lastProgress[selected]) {
         lastProgress[selected] = progress[selected].load();
         redrawLighting();
     }
@@ -590,18 +599,18 @@ void updateLighting() {
     if (!touch.wasPressed()) return;
     // CoreS3 SE's touch panel extends 40 pixels below the visible LCD.
     if (touch.y >= 240 && touch.y < 280 && touch.x >= 0 && touch.x < 320) {
-        selected = touch.x * 4 / 320;
-        environmentVisible.store(selected == 3);
+        page = static_cast<Page>(touch.x * 3 / 320);
+        environmentVisible.store(page == Page::Environment);
         redrawLighting();
         return;
     }
     if (touch.y >= 8 && touch.y < 34 && touch.x >= 8 && touch.x < 280) {
-        selected = (touch.x - 8) / 68;
-        environmentVisible.store(selected == 3);
+        page = static_cast<Page>((touch.x - 8) / 92);
+        environmentVisible.store(page == Page::Environment);
         redrawLighting();
         return;
     }
-    if (selected == 2) {
+    if (page == Page::Automation) {
         if (touch.y >= 43 && touch.y < 72) changeAutomation(0,0);
         for (int i=0; i<3; ++i) {
             if (touch.y < 81+i*35 || touch.y >= 108+i*35) continue;
@@ -611,26 +620,32 @@ void updateLighting() {
         redrawLighting();
         return;
     }
-    if (selected == 3) return;
+    if (page == Page::Environment) return;
+    if (touch.y >= 42 && touch.y < 68 && touch.x >= 8 && touch.x < 209) {
+        const int room = (touch.x - 8) / 103;
+        if ((touch.x - 8) % 103 < 98) selected = room;
+        redrawLighting();
+        return;
+    }
     if (busy[selected]) return;
     auto inside = [&](int x, int y, int w, int h) {
         return touch.x >= x && touch.x < x + w && touch.y >= y && touch.y < y + h;
     };
     for (int i = 0; i < 3; ++i) {
-        if (inside(8 + i * 103, 64, 98, 28)) {
+        if (inside(8 + i * 103, 74, 98, 26)) {
             requestLighting(i == 0 ? Power::On : i == 1 ? Power::Night : Power::Off, -1, selectedId());
         }
     }
     if (selected == 1) {
         for (int i = 0; i < 6; ++i) {
-            if (inside(8 + i * 51, 114, 47, 25)) requestLivingPercent(Axis::Brightness, i);
-            if (inside(8 + i * 51, 161, 47, 25)) requestLivingPercent(Axis::Color, i);
+            if (inside(8 + i * 51, 121, 47, 25)) requestLivingPercent(Axis::Brightness, i);
+            if (inside(8 + i * 51, 165, 47, 25)) requestLivingPercent(Axis::Color, i);
         }
-        if (inside(8, 193, 149, 25)) start(Signal::Full);
-        if (inside(162, 193, 150, 25)) start(Signal::Normal);
+        if (inside(8, 195, 149, 23)) start(Signal::Full);
+        if (inside(162, 195, 150, 23)) start(Signal::Normal);
     } else {
         for (int i = 0; i < 5; ++i) {
-            if (!inside(8 + i * 61, 122, 57, 25)) continue;
+            if (!inside(8 + i * 61, 128, 57, 28)) continue;
             if (states[0].power != Power::On) notices[0] = "点灯状態に合わせてから調光してください";
             else requestLighting(Power::On, i, Id::Kitchen);
         }
