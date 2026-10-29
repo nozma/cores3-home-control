@@ -478,7 +478,7 @@ void updateLighting() {
     if (!touch.wasPressed()) return;
     // CoreS3 SE's touch panel extends 40 pixels below the visible LCD.
     if (touch.y >= 240 && touch.y < 280 && touch.x >= 0 && touch.x < 320) {
-        selected = touch.x < 160 ? 0 : 1;
+        selected = touch.x * 3 / 320;
         redrawLighting();
         return;
     }
