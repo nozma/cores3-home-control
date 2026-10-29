@@ -1,5 +1,6 @@
 #include "lighting.h"
 #include "error_log.h"
+#include "light_storage.h"
 #include "light_model.h"
 #include "remo_ca.h"
 #if __has_include("remo_local.h")
@@ -221,7 +222,13 @@ bool enqueue(const Job& job) {
     if (needsCloud && !configured(job.id)) { notice = "Remoの設定を確認してください"; return false; }
     if (WiFi.status() != WL_CONNECTED) { notice = "Wi-Fi未接続です"; return false; }
     if (needsCloud && time(nullptr) < 1704067200) { notice = "時刻同期中です。少し待って再操作"; return false; }
-    if (xQueueSend(requests, &job, 0) != pdTRUE) { notice = "送信待ちです"; return false; }
+    if (!prepareLightState(job.id, states[n], normal[n], job)) {
+        notice = "状態を保存できません。送信を中止しました"; return false;
+    }
+    if (xQueueSend(requests, &job, 0) != pdTRUE) {
+        saveLightState(job.id, states[n], normal[n]);
+        notice = "送信待ちです"; return false;
+    }
     busy[n] = true;
     total[n] = job.count;
     progress[n].store(0);
@@ -353,6 +360,11 @@ void redrawLighting() {
 }
 
 void beginLighting() {
+    beginLightStorage();
+    for (int n = 0; n < 2; ++n) {
+        if (loadLightState(static_cast<Id>(n), states[n], normal[n]))
+            notices[n] = "保存した推定状態を復元しました";
+    }
     canvas.setColorDepth(16);
     canvasReady = canvas.createSprite(M5.Display.width(), M5.Display.height()) != nullptr;
     requests = xQueueCreate(2, sizeof(Job));
@@ -393,6 +405,8 @@ void updateLighting() {
                 result.code == 429 ? "送信制限：5分待ってから再操作" :
                 "送信失敗 " + String(result.code) + "：実際の状態を確認してください";
         }
+        if (!saveLightState(result.job.id, estimated, normal[n]))
+            notices[n] = "状態保存失敗：再起動後は一部未確認";
         Serial.printf("REMO_RESULT: device=%d completed=%d/%d code=%d\n", n, result.completed, result.job.count, result.code);
         busy[n] = false;
         redrawLighting();
