@@ -283,20 +283,15 @@ void drawFooter(String message) {
     d.setFont(&fonts::efontJA_12);
     d.setTextSize(1);
     String clock=footerClock();
-    // Reserve the clock's measured width and an 8px gap; never overlap it.
-    int available=300-d.textWidth(clock)-8;
-    bool clipped=d.textWidth(message)>available;
-    String suffix=clipped ? "…" : "";
-    while (message.length() && d.textWidth(message+suffix)>available) {
-        int pos=message.length()-1;
-        while(pos>0 && (static_cast<unsigned char>(message[pos])&0xc0)==0x80) --pos;
-        message.remove(pos);
-    }
+    // Give long messages the entire footer instead of abbreviating them.
+    bool showClock=d.textWidth(message)+d.textWidth(clock)+8<=300;
     d.drawFastHLine(10,219,300,uint32_t{0x25302c});
     d.setTextDatum(middle_left); d.setTextColor(accent,bg);
-    d.drawString(message+suffix,10,230);
-    d.setTextDatum(middle_right); d.setTextColor(muted,bg);
-    d.drawString(clock,310,230);
+    d.drawString(message,10,230);
+    if (showClock) {
+        d.setTextDatum(middle_right); d.setTextColor(muted,bg);
+        d.drawString(clock,310,230);
+    }
     d.setTextDatum(middle_center);
 }
 }

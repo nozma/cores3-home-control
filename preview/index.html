@@ -13,7 +13,7 @@
 .kitchen-label{margin-top:12px;margin-bottom:4px}.kitchen-label+.kitchen-adjust{margin-top:6px}
 .kitchen-adjust.segments button{height:25px;font-size:10px}.kitchen-adjust.segments button.chosen{background:#c8dda7;color:#233222}
 .wifi{display:flex;align-items:center;margin-right:0;color:#b9d58d}.wifi.offline{color:#819087}.wifi:before{content:none}
- .footer{gap:8px}.footer span:first-child{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.footer-clock{flex:none;width:36px;text-align:right}
+ .footer{gap:8px}.footer span:first-child{min-width:0;flex:1;overflow:hidden;text-overflow:clip;white-space:nowrap}.footer-clock{flex:none;width:36px;text-align:right}
 </style>
 <main>
 <div class="eyebrow">CORES3 SE / INTERFACE STUDY 01</div>
@@ -49,7 +49,12 @@ let total=1;let [axis,target]=action.split(':');if(axis==='brightness'||axis==='
 s.busy=true;s.progress=0;s.total=total;render();let timer=setInterval(()=>{s.progress++;if(s.progress>=total){clearInterval(timer);s.busy=false;s.notice='送信完了（受信は未確認）';if(['on','night','off'].includes(action)){s.power=action;if(id===1&&action==='on'){s.normal=true;s.brightness=s.color=null}}if(action==='cycle')s.power=({on:'night',night:'off',off:'on',unknown:'unknown'})[s.power];if(action==='sync'){s.power='on';s.brightness=100}if(action==='up')s.brightness=Math.min(100,s.brightness+20);if(action==='down')s.brightness=Math.max(20,s.brightness-20);if(action==='normal'||action==='full'){s.power='on';s.normal=action==='normal';s.brightness=action==='full'?100:null;s.color=null}if(axis==='brightness'||axis==='color'){if(s.power!=='on'){s.brightness=s.color=null;s.normal=false}s.power='on';s[axis]=target}}
 if(selected===id)render()},450)}
 scenario.addEventListener('change',()=>{let s=states[selected];if(s.busy){scenario.value=s.power;return}Object.assign(s,initial());const v=scenario.value;if(['off','night','unknown'].includes(v))s.power=v;if(v==='unknown'){s.brightness=s.color=null;s.notice='実際に点灯し、画面で合わせてください'}if(v==='normal'){s.normal=true;s.brightness=s.color=null}if(v==='error'){s.brightness=null;s.notice='通信失敗 · 明るさ未確認'}render()});network.addEventListener('change',render);render();
-function updateClock(){document.querySelectorAll('.footer-clock').forEach(e=>e.textContent=new Intl.DateTimeFormat('ja-JP',{timeZone:'Asia/Tokyo',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date()))}
+function updateClock(){document.querySelectorAll('.footer-clock').forEach(e=>{
+ e.style.display='block';
+ e.textContent=new Intl.DateTimeFormat('ja-JP',{timeZone:'Asia/Tokyo',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date());
+ const message=e.previousElementSibling, footer=e.parentElement;
+ if(message.scrollWidth+e.offsetWidth+8>footer.clientWidth)e.style.display='none';
+})}
 const renderLighting=render;render=function(){renderLighting();updateClock()};updateClock();setInterval(updateClock,1000);
 </script>
 </html>
