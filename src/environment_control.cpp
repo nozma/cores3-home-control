@@ -1,4 +1,5 @@
 #include "environment_control.h"
+#include "environment_curve.h"
 #include <LittleFS.h>
 #include <esp_partition.h>
 #include <atomic>
@@ -150,10 +151,23 @@ String drawEnvironmentGraph(lgfx::LGFXBase& d,const EnvironmentSample& sample,in
             if(!r||!(r->valid&(1<<axis))){previous=false;continue;}
             int x=px(slot),y=py(r->values[axis]);any=true;
             if(previous) {
-                if(line==0){d.drawLine(oldX,oldY,x,oldY,colors[axis]);d.drawLine(x,oldY,x,y,colors[axis]);}
-                else {if((slot%5)<3)d.drawLine(oldX,oldY,x,oldY,colors[axis]);if((slot%5)<3)d.drawLine(x,oldY,x,y,colors[axis]);}
+                envcurve::Segment curve;
+                if(envcurve::segment(history,slot-1,axis,startSlot,endSlot,curve)) {
+                    // Subpixel sampling also rounds corners when slots share a pixel.
+                    const int steps=std::max(4,(x-oldX)*2);
+                    int fromX=oldX,fromY=oldY;
+                    for(int step=1;step<=steps;++step) {
+                        float t=float(step)/steps;
+                        int toX=oldX+int(std::lround((x-oldX)*t));
+                        int toY=py(curve.at(t));
+                        if(line==0 || ((toX-left)%5)<3)
+                            d.drawLine(fromX,fromY,toX,toY,colors[axis]);
+                        fromX=toX;fromY=toY;
+                    }
+                }
             }
-            d.drawPixel(x,y,colors[axis]);oldX=x;oldY=y;previous=true;
+            if(line==0 || ((x-left)%5)<3)d.drawPixel(x,y,colors[axis]);
+            oldX=x;oldY=y;previous=true;
         }
         if(previous)d.fillCircle(oldX,oldY,2,colors[axis]);
     }
