@@ -1,4 +1,5 @@
 #include "environment_control.h"
+#include "environment_curve.h"
 #include <LittleFS.h>
 #include <esp_partition.h>
 #include <atomic>
@@ -145,15 +146,21 @@ String drawEnvironmentGraph(lgfx::LGFXBase& d,const EnvironmentSample& sample,in
             if(line==0)d.drawFastHLine(left+1,y,right-left-1,uint32_t{0x283c32});
         }
         bool previous=false;int oldX=0,oldY=0;
-        for(uint32_t slot=startSlot;slot<endSlot;++slot) {
-            const auto* r=history.get(slot);
-            if(!r||!(r->valid&(1<<axis))){previous=false;continue;}
-            int x=px(slot),y=py(r->values[axis]);any=true;
-            if(previous) {
-                if(line==0){d.drawLine(oldX,oldY,x,oldY,colors[axis]);d.drawLine(x,oldY,x,y,colors[axis]);}
-                else {if((slot%5)<3)d.drawLine(oldX,oldY,x,oldY,colors[axis]);if((slot%5)<3)d.drawLine(x,oldY,x,y,colors[axis]);}
-            }
-            d.drawPixel(x,y,colors[axis]);oldX=x;oldY=y;previous=true;
+        envcurve::columns(history,axis,startSlot,endSlot,left,right-left,
+            [&](int x,float v,bool connect) {
+                const int y=py(v);
+                const bool visible=line==0 || ((x-left)%5)<3;
+                if(connect && visible && (line==0 || ((oldX-left)%5)<3))
+                    d.drawLine(oldX,oldY,x,y,colors[axis]);
+                else if(visible)d.drawPixel(x,y,colors[axis]);
+                oldX=x;oldY=y;any=true;
+            });
+        // Only mark the newest completed slot, as before.
+        float latest;
+        previous=envcurve::average(history,endSlot-1,axis,startSlot,endSlot,latest);
+        if(previous) {
+            oldX=left+int(std::lround(float(endSlot-1-startSlot)*(right-left)/288));
+            oldY=py(latest);
         }
         if(previous)d.fillCircle(oldX,oldY,2,colors[axis]);
     }
