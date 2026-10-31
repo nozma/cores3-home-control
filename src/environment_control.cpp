@@ -146,28 +146,21 @@ String drawEnvironmentGraph(lgfx::LGFXBase& d,const EnvironmentSample& sample,in
             if(line==0)d.drawFastHLine(left+1,y,right-left-1,uint32_t{0x283c32});
         }
         bool previous=false;int oldX=0,oldY=0;
-        for(uint32_t slot=startSlot;slot<endSlot;++slot) {
-            const auto* r=history.get(slot);
-            if(!r||!(r->valid&(1<<axis))){previous=false;continue;}
-            int x=px(slot),y=py(r->values[axis]);any=true;
-            if(previous) {
-                envcurve::Segment curve;
-                if(envcurve::segment(history,slot-1,axis,startSlot,endSlot,curve)) {
-                    // Subpixel sampling also rounds corners when slots share a pixel.
-                    const int steps=std::max(4,(x-oldX)*2);
-                    int fromX=oldX,fromY=oldY;
-                    for(int step=1;step<=steps;++step) {
-                        float t=float(step)/steps;
-                        int toX=oldX+int(std::lround((x-oldX)*t));
-                        int toY=py(curve.at(t));
-                        if(line==0 || ((toX-left)%5)<3)
-                            d.drawLine(fromX,fromY,toX,toY,colors[axis]);
-                        fromX=toX;fromY=toY;
-                    }
-                }
-            }
-            if(line==0 || ((x-left)%5)<3)d.drawPixel(x,y,colors[axis]);
-            oldX=x;oldY=y;previous=true;
+        envcurve::columns(history,axis,startSlot,endSlot,left,right-left,
+            [&](int x,float v,bool connect) {
+                const int y=py(v);
+                const bool visible=line==0 || ((x-left)%5)<3;
+                if(connect && visible && (line==0 || ((oldX-left)%5)<3))
+                    d.drawLine(oldX,oldY,x,y,colors[axis]);
+                else if(visible)d.drawPixel(x,y,colors[axis]);
+                oldX=x;oldY=y;any=true;
+            });
+        // Only mark the newest completed slot, as before.
+        float latest;
+        previous=envcurve::average(history,endSlot-1,axis,startSlot,endSlot,latest);
+        if(previous) {
+            oldX=left+int(std::lround(float(endSlot-1-startSlot)*(right-left)/288));
+            oldY=py(latest);
         }
         if(previous)d.fillCircle(oldX,oldY,2,colors[axis]);
     }
