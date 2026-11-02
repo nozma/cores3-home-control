@@ -49,8 +49,8 @@ bool normal[2]{};
 std::atomic<int> progress[2]{};
 int total[2]{};
 String notices[2] = {"点灯中にキャリブレーションを押す", "照明を選んで操作してください"};
-enum class Page { Remote, Automation, Environment };
-Page page = Page::Remote;
+enum class Page { Environment, Automation, Remote };
+Page page = Page::Environment;
 // Remember the selected room independently of the top-level page.
 int selected = 0;
 M5Canvas canvas(&M5.Display);
@@ -400,7 +400,7 @@ void redrawLighting() {
         const bool active = static_cast<int>(page) == n;
         d.fillRoundRect(8 + n * 92, 8, 88, 26, 6, active ? selectedBg : bg);
         d.setTextColor(active ? text : muted, active ? selectedBg : bg);
-        d.drawString(n == 0 ? "リモコン" : n == 1 ? "自動制御" : "環境", 52 + n * 92, 21);
+        d.drawString(n == 0 ? "環境" : n == 1 ? "自動制御" : "リモコン", 52 + n * 92, 21);
     }
     bool connected = WiFi.status() == WL_CONNECTED;
     const uint32_t wifiColor = connected ? uint32_t{0xb9d58d} : uint32_t{0x819087};
